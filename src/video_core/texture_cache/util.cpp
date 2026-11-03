@@ -870,6 +870,25 @@ u64 ImageSliceGroupHostBytes(const ImageInfo& info) {
            ImageSliceGroupSlices(info);
 }
 
+BufferImageCopy ImageSliceGroupCopy(const ImageInfo& info, u32 z_start, u32 z_count,
+                                    size_t buffer_offset, size_t buffer_size) {
+    const Extent2D tile_size = DefaultBlockSize(info.format);
+    return BufferImageCopy{
+        .buffer_offset = buffer_offset,
+        .buffer_size = buffer_size,
+        .buffer_row_length = Common::AlignUp(info.size.width, tile_size.width),
+        .buffer_image_height = Common::AlignUp(info.size.height, tile_size.height),
+        .image_subresource =
+            {
+                .base_level = 0,
+                .base_layer = 0,
+                .num_layers = 1,
+            },
+        .image_offset = {0, 0, static_cast<s32>(z_start)},
+        .image_extent = {info.size.width, info.size.height, z_count},
+    };
+}
+
 BufferImageCopy UnswizzleImageSliceGroup(const ImageInfo& info, std::span<const u8> input,
                                          std::span<u8> output, u32 z_start, u32 z_count,
                                          size_t buffer_offset) {
@@ -886,20 +905,7 @@ BufferImageCopy UnswizzleImageSliceGroup(const ImageInfo& info, std::span<const 
     const u32 group_slices = ImageSliceGroupSlices(info);
     UnswizzleTexture(output, input, 1U << bpp_log2, num_tiles.width, num_tiles.height,
                      group_slices, block.height, block.depth, stride_alignment);
-    return BufferImageCopy{
-        .buffer_offset = buffer_offset,
-        .buffer_size = output.size_bytes(),
-        .buffer_row_length = Common::AlignUp(info.size.width, tile_size.width),
-        .buffer_image_height = Common::AlignUp(info.size.height, tile_size.height),
-        .image_subresource =
-            {
-                .base_level = 0,
-                .base_layer = 0,
-                .num_layers = 1,
-            },
-        .image_offset = {0, 0, static_cast<s32>(z_start)},
-        .image_extent = {info.size.width, info.size.height, z_count},
-    };
+    return ImageSliceGroupCopy(info, z_start, z_count, buffer_offset, output.size_bytes());
 }
 
 boost::container::small_vector<BufferImageCopy, 16> UnswizzleImage(Tegra::MemoryManager& gpu_memory,

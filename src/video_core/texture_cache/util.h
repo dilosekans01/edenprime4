@@ -132,6 +132,11 @@ void DeduceBlitImages(ImageInfo& dst_info, ImageInfo& src_info, const ImageBase*
 /// eden-kledd: host (linear) bytes of one full z group after unswizzling
 [[nodiscard]] u64 ImageSliceGroupHostBytes(const ImageInfo& info);
 
+/// eden-kledd: the copy that uploads slices [z_start, z_start + z_count) of one z group from a
+/// linear group of buffer_size bytes at buffer_offset
+[[nodiscard]] BufferImageCopy ImageSliceGroupCopy(const ImageInfo& info, u32 z_start, u32 z_count,
+                                                  size_t buffer_offset, size_t buffer_size);
+
 /// eden-kledd: unswizzles one z group from its guest bytes into output (sized for a full group)
 /// and returns the copy that uploads slices [z_start, z_start + z_count) from buffer_offset.
 [[nodiscard]] BufferImageCopy UnswizzleImageSliceGroup(const ImageInfo& info,

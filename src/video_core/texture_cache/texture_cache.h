@@ -141,6 +141,13 @@ void TextureCache<P>::RunGarbageCollector() {
         if (True(image.flags & ImageFlagBits::IsDecoding)) {
             return false;
         }
+        // eden-kledd: a watched texture pool is sampled every frame and would be created again,
+        // with gigabytes of uploads, right after being deleted. It only goes once it has not been
+        // drawn for a long while.
+        if (KleddFindWatch(image_id) != nullptr &&
+            frame_tick - lru_cache.GetTick(image.lru_index) < KLEDD_WATCH_GC_TICKS) {
+            return false;
+        }
         const bool must_download = IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap);
         if ((!aggressive_mode && True(image.flags & ImageFlagBits::CostlyLoad)) || (!high_priority_mode && must_download)) {
             return false;
@@ -1603,16 +1610,110 @@ void TextureCache<P>::KleddMarkWritten(ImageId image_id, const ImageBase& image,
 }
 
 template <class P>
+bool TextureCache<P>::KleddGroupMapped(const ImageBase& image, const KleddWatch& watch,
+                                       u32 group) {
+    if (False(image.flags & ImageFlagBits::Sparse)) {
+        return true;
+    }
+    const u64 image_end = image.gpu_addr + image.guest_size_bytes;
+    const u64 begin = (std::min)(image.gpu_addr + group * watch.group_bytes, image_end);
+    const u64 end = (std::min)(begin + watch.group_bytes, image_end);
+    if (end <= begin) {
+        return false;
+    }
+    return gpu_memory
+        ->GpuToCpuAddress(static_cast<GPUVAddr>(begin), static_cast<size_t>(end - begin))
+        .has_value();
+}
+
+template <class P>
+typename TextureCache<P>::KleddUploadStats TextureCache<P>::KleddUploadGroups(
+    Image& image, const KleddWatch& watch, std::span<const u32> groups) {
+    // Staging requests stay within one stream buffer region so they come from the ring rather
+    // than from dedicated allocations, and the GPU is waited for before the ring would overflow:
+    // a 955 MiB pool no longer pins a staging buffer of its own size the way one request did.
+    constexpr u64 request_budget = 16_MiB;
+    constexpr u64 ring_budget = 192_MiB;
+    KleddUploadStats stats{};
+    const auto& info = image.info;
+    const u64 host_group_bytes = ImageSliceGroupHostBytes(info);
+    const size_t groups_per_request =
+        host_group_bytes >= request_budget
+            ? 1
+            : static_cast<size_t>(request_budget / host_group_bytes);
+    u64 staged_since_wait = 0;
+    const auto stage = [&](u64 bytes) {
+        if (staged_since_wait + bytes > ring_budget) {
+            runtime.Finish();
+            stats.waits++;
+            staged_since_wait = 0;
+        }
+        staged_since_wait += bytes;
+        stats.staged_bytes += bytes;
+        return runtime.UploadStagingBuffer(static_cast<size_t>(bytes));
+    };
+
+    // A group without a mapped page reads as zeros, so it is filled from one zeroed staging
+    // region instead of being read and unswizzled; a fresh sparse pool is almost all such groups.
+    std::vector<u32> mapped;
+    std::vector<u32> unmapped;
+    mapped.reserve(groups.size());
+    for (const u32 group : groups) {
+        (KleddGroupMapped(image, watch, group) ? mapped : unmapped).push_back(group);
+    }
+    if (!unmapped.empty()) {
+        auto staging = stage(host_group_bytes);
+        std::memset(staging.mapped_span.data(), 0, static_cast<size_t>(host_group_bytes));
+        std::vector<BufferImageCopy> copies;
+        copies.reserve(unmapped.size());
+        for (const u32 group : unmapped) {
+            const u32 z_start = group * watch.group_slices;
+            const u32 z_count = (std::min)(watch.group_slices, info.size.depth - z_start);
+            copies.push_back(ImageSliceGroupCopy(info, z_start, z_count, 0,
+                                                 static_cast<size_t>(host_group_bytes)));
+        }
+        image.UploadMemory(staging, copies);
+        stats.zero_filled = static_cast<u32>(unmapped.size());
+    }
+    for (size_t first = 0; first < mapped.size(); first += groups_per_request) {
+        const size_t count = (std::min)(groups_per_request, mapped.size() - first);
+        auto staging = stage(host_group_bytes * count);
+        boost::container::small_vector<BufferImageCopy, 16> copies;
+        size_t host_offset = 0;
+        for (size_t i = 0; i < count; ++i) {
+            const u32 group = mapped[first + i];
+            const u32 z_start = group * watch.group_slices;
+            const u32 z_count = (std::min)(watch.group_slices, info.size.depth - z_start);
+            Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> guest(
+                *gpu_memory, image.gpu_addr + group * watch.group_bytes, watch.group_bytes,
+                &swizzle_data_buffer);
+            const std::span<const u8> input(guest.data(), watch.group_bytes);
+            copies.push_back(UnswizzleImageSliceGroup(
+                info, input, staging.mapped_span.subspan(host_offset, host_group_bytes), z_start,
+                z_count, host_offset));
+            host_offset += static_cast<size_t>(host_group_bytes);
+        }
+        image.UploadMemory(staging, copies);
+        stats.read += static_cast<u32>(count);
+    }
+    runtime.InsertUploadMemoryBarrier();
+    return stats;
+}
+
+template <class P>
 bool TextureCache<P>::KleddTryDeltaUpload(Image& image, ImageId image_id) {
     // eden-kledd: Metroid Prime 4 streams texture pages from the CPU into a few 170-955 MiB
     // single-level 3D textures, and in some places writes to them every frame. Every write made
     // the cache re-upload the whole image. Instead keep the image protected after an upload,
-    // let a write unprotect and mark only its z group, and upload just the marked groups.
+    // let a write unprotect and mark only its z group, and upload just the marked groups. The
+    // watch attaches at the image's first upload, which comes before the image is registered, so
+    // a new pool's tiles are uploaded as the game maps them instead of all at once.
     constexpr u64 min_bytes = 64_MiB;
 
     const auto& info = image.info;
     const u64 guest_bytes = image.guest_size_bytes;
     KleddWatch* watch = KleddFindWatch(image_id);
+    const bool first = watch == nullptr;
     if (!watch) {
         if (guest_bytes < min_bytes) {
             return false;
@@ -1630,9 +1731,6 @@ bool TextureCache<P>::KleddTryDeltaUpload(Image& image, ImageId image_id) {
             decline = "rescaled";
         } else if (False(image.flags & ImageFlagBits::Tracked)) {
             decline = "image not tracked";
-        } else if (True(image.flags & ImageFlagBits::Sparse) &&
-                   !sparse_views.contains(image_id)) {
-            decline = "sparse image without map views";
         } else if ((group_bytes = ImageSliceGroupBytes(info, guest_bytes)) == 0) {
             decline = "unsupported block layout";
         }
@@ -1658,29 +1756,31 @@ bool TextureCache<P>::KleddTryDeltaUpload(Image& image, ImageId image_id) {
             return false;
         }
         // The image is fully tracked right now (RefreshContents made sure of it), so every group
-        // starts out protected and the page counts match the whole-image count already taken.
+        // starts out protected and the page counts match the whole-image count already taken. A
+        // sparse image is normally still unregistered here and has no map views yet, but the
+        // pages TrackImage protected are exactly the ones RegisterImage is about to put in them.
         watch = &kledd_watches[image_id];
         watch->group_bytes = group_bytes;
         watch->group_slices = group_slices;
         watch->num_groups = num_groups;
         watch->tracked.assign(num_groups, 1);
-        watch->dirty.assign(num_groups, 0);
-        watch->complete = false;
+        watch->dirty.assign(num_groups, 1);
+        watch->complete = true;
         LOG_INFO(HW_GPU,
                  "[Kledd] watching image {:#x} {}x{}x{} fmt {} {} MiB: {} z groups of {} slices "
-                 "({} MiB each){}",
+                 "({} MiB each){}{}",
                  image.gpu_addr, info.size.width, info.size.height, info.size.depth,
                  static_cast<u32>(info.format), guest_bytes >> 20, num_groups, group_slices,
-                 group_bytes >> 20, True(image.flags & ImageFlagBits::Sparse) ? ", sparse" : "");
+                 group_bytes >> 20, True(image.flags & ImageFlagBits::Sparse) ? ", sparse" : "",
+                 True(image.flags & ImageFlagBits::Registered) ? "" : ", new image");
     }
 
-    if (!watch->complete || True(image.flags & ImageFlagBits::GpuModified)) {
-        // Full upload through the regular path; from then on the watch is valid. Protect any
-        // unprotected group first so writes during and after the upload are seen.
-        KleddTrackGroups(image_id, image, *watch, true);
-        std::fill(watch->dirty.begin(), watch->dirty.end(), 0);
+    const bool full = !watch->complete || True(image.flags & ImageFlagBits::GpuModified);
+    if (full) {
+        // Writes went unobserved while the image was untracked, or the GPU wrote it: every
+        // group is uploaded again, through the group path so the staging memory stays bounded.
+        std::fill(watch->dirty.begin(), watch->dirty.end(), 1);
         watch->complete = true;
-        return false;
     }
 
     std::vector<u32> changed;
@@ -1698,33 +1798,21 @@ bool TextureCache<P>::KleddTryDeltaUpload(Image& image, ImageId image_id) {
     }
 
     const auto upload_start = std::chrono::steady_clock::now();
-    const u64 host_group_bytes = ImageSliceGroupHostBytes(info);
-    auto staging = runtime.UploadStagingBuffer(host_group_bytes * changed.size());
-    boost::container::small_vector<BufferImageCopy, 16> copies;
-    size_t host_offset = 0;
-    for (const u32 group : changed) {
-        const u32 z_start = group * watch->group_slices;
-        const u32 z_count = (std::min)(watch->group_slices, info.size.depth - z_start);
-        Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> guest(
-            *gpu_memory, image.gpu_addr + group * watch->group_bytes, watch->group_bytes,
-            &swizzle_data_buffer);
-        const std::span<const u8> input(guest.data(), watch->group_bytes);
-        copies.push_back(UnswizzleImageSliceGroup(
-            info, input, staging.mapped_span.subspan(host_offset, host_group_bytes), z_start,
-            z_count, host_offset));
-        host_offset += host_group_bytes;
-    }
-    image.UploadMemory(staging, copies);
-    runtime.InsertUploadMemoryBarrier();
+    const KleddUploadStats stats = KleddUploadGroups(image, *watch, changed);
     const auto upload_end = std::chrono::steady_clock::now();
-
+    const u64 read_bytes = stats.read * watch->group_bytes;
+    Common::Kledd::GetFrameStats().upload_bytes.fetch_add(read_bytes, std::memory_order_relaxed);
+    if (first || full) {
+        KleddNoteBigUpload(image);
+    }
     LOG_INFO(HW_GPU,
-             "[Kledd] delta upload image {:#x} {}x{}x{} fmt {}: {} of {} z groups written ({} of "
-             "{} MiB, {} remap events, {} views rebuilt), {} ms",
-             image.gpu_addr, info.size.width, info.size.height, info.size.depth,
-             static_cast<u32>(info.format), changed.size(), watch->num_groups,
-             (changed.size() * watch->group_bytes) >> 20, guest_bytes >> 20, watch->dirty_by_remap,
-             watch->views_rebuilt,
+             "[Kledd] {} upload image {:#x} {}x{}x{} fmt {}: {} of {} z groups written ({} of "
+             "{} MiB read, {} groups zero-filled, {} remap events, {} views rebuilt, {} MiB "
+             "staged, {} gpu waits), {} ms",
+             first ? "first" : (full ? "full" : "delta"), image.gpu_addr, info.size.width,
+             info.size.height, info.size.depth, static_cast<u32>(info.format), changed.size(),
+             watch->num_groups, read_bytes >> 20, guest_bytes >> 20, stats.zero_filled,
+             watch->dirty_by_remap, watch->views_rebuilt, stats.staged_bytes >> 20, stats.waits,
              std::chrono::duration_cast<std::chrono::milliseconds>(upload_end - upload_start)
                  .count());
     watch->dirty_by_remap = 0;

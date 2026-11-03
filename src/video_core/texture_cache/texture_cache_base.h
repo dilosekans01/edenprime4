@@ -276,7 +276,8 @@ private:
         u64 group_bytes = 0;
         u32 group_slices = 0;
         u32 num_groups = 0;
-        /// Host image holds a full upload and every clean group is still protected
+        /// Every write since the last upload was seen by the watch, so the dirty groups are the
+        /// only ones whose host copy is stale; false after the image was untracked
         bool complete = false;
         std::vector<u8> tracked;
         std::vector<u8> dirty;
@@ -305,6 +306,20 @@ private:
                            GPUVAddr gpu_addr, size_t size);
     /// Replaces the map views of the remapped ranges with the current page table mapping
     void KleddRebuildViews(ImageId image_id, const ImageBase& image, KleddWatch& watch);
+    /// Frames a watched image may go undrawn before the garbage collector may take it
+    static constexpr u64 KLEDD_WATCH_GC_TICKS = 600;
+    struct KleddUploadStats {
+        u32 read = 0;        ///< groups read from guest memory and unswizzled
+        u32 zero_filled = 0; ///< groups without a mapped page, filled with zeros on the GPU
+        u32 waits = 0;       ///< GPU waits made so the staging ring could be reused
+        u64 staged_bytes = 0;
+    };
+    /// True when any page of the z group's GPU range is mapped (always for non-sparse images)
+    bool KleddGroupMapped(const ImageBase& image, const KleddWatch& watch, u32 group);
+    /// Uploads the given z groups: mapped ones are read and unswizzled through bounded staging
+    /// requests, unmapped ones are filled with zeros from one zeroed staging region
+    KleddUploadStats KleddUploadGroups(Image& image, const KleddWatch& watch,
+                                       std::span<const u32> groups);
     bool KleddTryDeltaUpload(Image& image, ImageId image_id);
 
     /// eden-kledd: log the previous frame if it took too long, then reset the frame counters
