@@ -44,7 +44,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           set +e
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DYUZU_TESTS=OFF \
-            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCMAKE_INSTALL_PREFIX=/usr -DUSE_DISCORD_PRESENCE=ON \
             -DVulkanHeaders_FORCE_BUNDLED=ON -DVulkanUtilityLibraries_FORCE_BUNDLED=ON > configure.log 2>&1
           code=$?
           if [ $code -ne 0 ]; then

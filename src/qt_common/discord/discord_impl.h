@@ -8,7 +8,11 @@
 
 #include "discord.h"
 
+#include <mutex>
 #include <string>
+#include <thread>
+
+#include "common/common_types.h"
 
 namespace Core {
 class System;
@@ -29,7 +33,14 @@ private:
     void UpdateGameStatus(std::string_view game_url, bool use_default);
 
     std::string game_title{};
+    s64 game_start_time{};
     Core::System& system;
+
+    /// Checks for box art off the UI thread; the game is shown without it until the answer is in
+    std::thread boxart_thread;
+    /// Guards the generation, which tells a running box art check whether it is still current
+    std::mutex presence_mutex;
+    u64 presence_generation{};
 };
 
 } // namespace DiscordRPC

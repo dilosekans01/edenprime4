@@ -49,7 +49,7 @@ jobs:
       - name: Configure
         shell: pwsh
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DYUZU_USE_BUNDLED_QT=OFF "-DQt6_DIR=$env:QT_ROOT_DIR/lib/cmake/Qt6" -DYUZU_TESTS=OFF -DENABLE_UPDATE_CHECKER=OFF 2>&1 | Tee-Object -FilePath configure.log
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DYUZU_USE_BUNDLED_QT=OFF "-DQt6_DIR=$env:QT_ROOT_DIR/lib/cmake/Qt6" -DYUZU_TESTS=OFF -DENABLE_UPDATE_CHECKER=OFF -DUSE_DISCORD_PRESENCE=ON 2>&1 | Tee-Object -FilePath configure.log
           $code = $LASTEXITCODE
           if ($code -ne 0) {
             $msg = ((Get-Content configure.log | Select-Object -Last 50) -join "`n").Replace('%','%25').Replace("`r",'').Replace("`n",'%0A')
