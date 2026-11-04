@@ -306,12 +306,12 @@ private:
                            GPUVAddr gpu_addr, size_t size);
     /// Replaces the map views of the remapped ranges with the current page table mapping
     void KleddRebuildViews(ImageId image_id, const ImageBase& image, KleddWatch& watch);
-    /// Frames a watched image may go undrawn before the garbage collector may take it
+    /// Frames a watched image may go undrawn before the garbage collector may take it, as long
+    /// as texture memory is below the critical budget
     static constexpr u64 KLEDD_WATCH_GC_TICKS = 600;
     struct KleddUploadStats {
         u32 read = 0;        ///< groups read from guest memory and unswizzled
         u32 zero_filled = 0; ///< groups without a mapped page, filled with zeros on the GPU
-        u32 waits = 0;       ///< GPU waits made so the staging ring could be reused
         u64 staged_bytes = 0;
     };
     /// True when any page of the z group's GPU range is mapped (always for non-sparse images)

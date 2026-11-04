@@ -141,10 +141,11 @@ void TextureCache<P>::RunGarbageCollector() {
         if (True(image.flags & ImageFlagBits::IsDecoding)) {
             return false;
         }
-        // eden-kledd: a watched texture pool is sampled every frame and would be created again,
-        // with gigabytes of uploads, right after being deleted. It only goes once it has not been
-        // drawn for a long while.
-        if (KleddFindWatch(image_id) != nullptr &&
+        // eden-kledd: a watched texture pool that a menu hides for a moment would come straight
+        // back with its uploads if it were deleted, so it gets a while to be drawn again. Only
+        // within budget: when an area change brings a new pool set in, the old set has to make
+        // room right away or both sets together overrun the card's memory.
+        if (total_used_memory < critical_memory && KleddFindWatch(image_id) != nullptr &&
             frame_tick - lru_cache.GetTick(image.lru_index) < KLEDD_WATCH_GC_TICKS) {
             return false;
         }
@@ -1629,11 +1630,10 @@ bool TextureCache<P>::KleddGroupMapped(const ImageBase& image, const KleddWatch&
 template <class P>
 typename TextureCache<P>::KleddUploadStats TextureCache<P>::KleddUploadGroups(
     Image& image, const KleddWatch& watch, std::span<const u32> groups) {
-    // Staging requests stay within one stream buffer region so they come from the ring rather
-    // than from dedicated allocations, and the GPU is waited for before the ring would overflow:
-    // a 955 MiB pool no longer pins a staging buffer of its own size the way one request did.
+    // Staging requests stay within one stream buffer region, so they come from the ring while it
+    // has room and from reusable buffers of that size when it does not. Never wait for the GPU
+    // here: draining it per pool cost far more than reading and unswizzling the pool.
     constexpr u64 request_budget = 16_MiB;
-    constexpr u64 ring_budget = 192_MiB;
     KleddUploadStats stats{};
     const auto& info = image.info;
     const u64 host_group_bytes = ImageSliceGroupHostBytes(info);
@@ -1641,14 +1641,7 @@ typename TextureCache<P>::KleddUploadStats TextureCache<P>::KleddUploadGroups(
         host_group_bytes >= request_budget
             ? 1
             : static_cast<size_t>(request_budget / host_group_bytes);
-    u64 staged_since_wait = 0;
     const auto stage = [&](u64 bytes) {
-        if (staged_since_wait + bytes > ring_budget) {
-            runtime.Finish();
-            stats.waits++;
-            staged_since_wait = 0;
-        }
-        staged_since_wait += bytes;
         stats.staged_bytes += bytes;
         return runtime.UploadStagingBuffer(static_cast<size_t>(bytes));
     };
@@ -1808,11 +1801,11 @@ bool TextureCache<P>::KleddTryDeltaUpload(Image& image, ImageId image_id) {
     LOG_INFO(HW_GPU,
              "[Kledd] {} upload image {:#x} {}x{}x{} fmt {}: {} of {} z groups written ({} of "
              "{} MiB read, {} groups zero-filled, {} remap events, {} views rebuilt, {} MiB "
-             "staged, {} gpu waits), {} ms",
+             "staged), {} ms",
              first ? "first" : (full ? "full" : "delta"), image.gpu_addr, info.size.width,
              info.size.height, info.size.depth, static_cast<u32>(info.format), changed.size(),
              watch->num_groups, read_bytes >> 20, guest_bytes >> 20, stats.zero_filled,
-             watch->dirty_by_remap, watch->views_rebuilt, stats.staged_bytes >> 20, stats.waits,
+             watch->dirty_by_remap, watch->views_rebuilt, stats.staged_bytes >> 20,
              std::chrono::duration_cast<std::chrono::milliseconds>(upload_end - upload_start)
                  .count());
     watch->dirty_by_remap = 0;
