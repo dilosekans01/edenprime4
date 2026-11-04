@@ -345,11 +345,11 @@ struct Values {
 
     // Graphics Settings
     ResolutionScalingInfo resolution_info{};
-    SwitchableSetting<ResolutionSetup> resolution_setup{linkage, ResolutionSetup::Res1X,
+    SwitchableSetting<ResolutionSetup> resolution_setup{linkage, ResolutionSetup::Res2X,
                                                         "resolution_setup", Category::Renderer};
 
     SwitchableSetting<VSyncMode, true> vsync_mode{linkage,
-                                                  VSyncMode::Fifo,
+                                                  VSyncMode::Mailbox,
                                                   "use_vsync",
                                                   Category::Renderer,
                                                   Specialization::RuntimeList,
@@ -357,7 +357,7 @@ struct Values {
                                                   true};
 
     SwitchableSetting<ScalingFilter> scaling_filter{linkage,
-                                                    ScalingFilter::NearestNeighbor,
+                                                    ScalingFilter::ScaleForce,
                                                     "scaling_filter",
                                                     Category::Renderer,
                                                     Specialization::Default,
@@ -386,7 +386,7 @@ struct Values {
                                                       true};
 
     SwitchableSetting<AntiAliasing> anti_aliasing{linkage,
-                                                  AntiAliasing::None,
+                                                  AntiAliasing::Smaa,
                                                   "anti_aliasing",
                                                   Category::Renderer,
                                                   Specialization::Default,
@@ -533,11 +533,11 @@ struct Values {
                                                                  true};
 
     SwitchableSetting<VramUsageMode, true> vram_usage_mode{linkage,
-                                                           VramUsageMode::Conservative,
+                                                           VramUsageMode::Aggressive,
                                                            "vram_usage_mode",
                                                            Category::RendererAdvanced};
 
-    SwitchableSetting<NvdecEmulation> nvdec_emulation{linkage, NvdecEmulation::Cpu,
+    SwitchableSetting<NvdecEmulation> nvdec_emulation{linkage, NvdecEmulation::Gpu,
                                                       "nvdec_emulation", Category::RendererAdvanced};
 
     SwitchableSetting<AnisotropyMode, true> max_anisotropy{linkage,
@@ -594,11 +594,7 @@ struct Values {
                                                 Category::RendererAdvanced};
 
     SwitchableSetting<bool> use_reactive_flushing{linkage,
-#ifdef __ANDROID__
                                                   false,
-#else
-                                                  true,
-#endif
                                                   "use_reactive_flushing",
                                                   Category::RendererAdvanced};
 
@@ -606,7 +602,7 @@ struct Values {
                                                    Category::RendererAdvanced};
 
     SwitchableSetting<bool> enable_buffer_history{linkage,
-                                                  false,
+                                                  true,
                                                   "enable_buffer_history",
                                                   Category::RendererAdvanced,
                                                   Specialization::Default,
@@ -656,13 +652,13 @@ struct Values {
     SwitchableSetting<bool> kledd_dma_readback_log{linkage, false, "kledd_dma_readback_log",
                                                    Category::RendererHacks};
     // eden-kledd: log frames that take too long, with texture/pipeline work done in them
-    SwitchableSetting<bool> kledd_frame_log{linkage, false, "kledd_frame_log",
+    SwitchableSetting<bool> kledd_frame_log{linkage, true, "kledd_frame_log",
                                             Category::RendererHacks};
 
     SwitchableSetting<bool> emulate_bgr565{linkage, false, "emulate_bgr565",
                                             Category::RendererHacks};
 
-    SwitchableSetting<bool> use_asynchronous_shaders{linkage, false, "use_asynchronous_shaders",
+    SwitchableSetting<bool> use_asynchronous_shaders{linkage, true, "use_asynchronous_shaders",
                                                      Category::RendererHacks};
 
     SwitchableSetting<GpuUnswizzleSize> gpu_unswizzle_texture_size{linkage,

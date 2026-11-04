@@ -155,7 +155,7 @@ struct Values {
 #endif
 
     // Discord RPC
-    Setting<bool> enable_discord_presence{linkage, false, "enable_discord_presence", Category::Ui};
+    Setting<bool> enable_discord_presence{linkage, true, "enable_discord_presence", Category::Ui};
 
     // logging
     Setting<bool> show_console{linkage, false, "showConsole", Category::Ui};
