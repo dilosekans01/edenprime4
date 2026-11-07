@@ -51,6 +51,11 @@ public:
      */
     double GetLastFrameTimeScale() const;
 
+    /// eden-kledd: game frames since boot, never reset (read by the audio pacing).
+    u64 GetTotalGameFrames() const {
+        return total_game_frames.load(std::memory_order_relaxed);
+    }
+
 private:
     mutable std::mutex object_mutex;
 
@@ -73,6 +78,8 @@ private:
     u32 system_frames = 0;
     /// Cumulative number of game frames (GSP frame submissions) since last reset
     std::atomic<u32> game_frames = 0;
+    /// Game frames since boot, never reset
+    std::atomic<u64> total_game_frames = 0;
 
     /// Point when the previous system frame ended
     Clock::time_point previous_frame_end = reset_point;

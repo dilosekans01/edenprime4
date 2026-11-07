@@ -4,7 +4,9 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <atomic>
 #include <memory>
 #include <span>
@@ -20,6 +22,7 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "core/perf_stats.h"
 
 namespace AudioCore::Sink {
 
@@ -214,48 +217,43 @@ void SinkStream::ProcessAudioOutAndRender(std::span<s16> output_buffer, std::siz
         return;
     }
 
-    while (frames_written < num_frames) {
-        if (playing_buffer.consumed || playing_buffer.frames == 0) {
-            std::unique_lock lk{release_mutex};
-
-            if (!queue.TryPop(playing_buffer)) {
-                lk.unlock();
-                for (size_t i = frames_written; i < num_frames; i++)
-                    std::memcpy(&output_buffer[i * frame_size], last_frame.data(), frame_size_bytes);
-                NoteIssue(SinkIssue::Underrun, num_frames - frames_written);
-                frames_written = num_frames;
-                continue;
-            }
-
-            --queued_buffers;
-            lk.unlock();
-            release_cv.notify_one();
+    if (type != StreamType::Render) {
+        actual_frames_written = PopFrames(output_buffer.data(), num_frames);
+        frames_written = num_frames;
+    } else {
+        // eden-kledd: play the game's sound at the game's pace. When the game renders fewer
+        // frames than usual, its cutscene timeline moves slower than real time, and sound
+        // played at full speed runs ahead of the lips. Consuming the queue at the same rate
+        // also holds back the DSP (it waits for free space), so the voices advance in step.
+        // At full speed the rate is exactly 1 and this is a plain copy, one frame behind.
+        const double rate = UpdateGamePace();
+        size_t pending_frames = pace_pending.size() / frame_size;
+        const size_t needed =
+            static_cast<size_t>(pace_pos + static_cast<double>(num_frames - 1) * rate) + 2;
+        if (needed > pending_frames) {
+            pace_pending.resize(needed * frame_size);
+            actual_frames_written =
+                PopFrames(&pace_pending[pending_frames * frame_size], needed - pending_frames);
+            pending_frames = needed;
         }
-
-        const size_t frames_available = std::min<u64>(playing_buffer.frames - playing_buffer.frames_played, num_frames - frames_written);
-
-        const size_t wanted_samples = frames_available * frame_size;
-        const size_t popped_samples =
-            samples_buffer.Pop(&output_buffer[frames_written * frame_size], wanted_samples);
-        if (popped_samples < wanted_samples) {
-            // The queue promised more samples than the ring holds. Hold the last good frame
-            // instead of leaving whatever the backend had in this buffer, which audibly loops.
-            const size_t popped_frames = popped_samples / frame_size;
-            const s16* hold = popped_frames > 0
-                                  ? &output_buffer[(frames_written + popped_frames - 1) * frame_size]
-                                  : last_frame.data();
-            for (size_t i = frames_written + popped_frames; i < frames_written + frames_available; i++) {
-                std::memcpy(&output_buffer[i * frame_size], hold, frame_size_bytes);
+        for (size_t i = 0; i < num_frames; i++) {
+            const double p = pace_pos + static_cast<double>(i) * rate;
+            const size_t k = static_cast<size_t>(p);
+            const double frac = p - static_cast<double>(k);
+            const s16* a = &pace_pending[k * frame_size];
+            const s16* b = &pace_pending[(k + 1) * frame_size];
+            for (size_t c = 0; c < frame_size; c++) {
+                output_buffer[i * frame_size + c] = static_cast<s16>(
+                    static_cast<double>(a[c]) +
+                    (static_cast<double>(b[c]) - static_cast<double>(a[c])) * frac);
             }
-            NoteIssue(SinkIssue::ShortPop, frames_available - popped_frames);
         }
-
-        frames_written += frames_available;
-        actual_frames_written += frames_available;
-        playing_buffer.frames_played += frames_available;
-
-        if (playing_buffer.frames_played >= playing_buffer.frames)
-            playing_buffer.consumed = true;
+        const double end = pace_pos + static_cast<double>(num_frames) * rate;
+        const size_t drop = (std::min)(static_cast<size_t>(end), pending_frames - 1);
+        pace_pending.erase(pace_pending.begin(),
+                           pace_pending.begin() + static_cast<std::ptrdiff_t>(drop * frame_size));
+        pace_pos = end - static_cast<double>(drop);
+        frames_written = num_frames;
     }
 
     std::memcpy(last_frame.data(), &output_buffer[(frames_written - 1) * frame_size], frame_size_bytes);
@@ -266,6 +264,118 @@ void SinkStream::ProcessAudioOutAndRender(std::span<s16> output_buffer, std::siz
         min_played_sample_count = max_played_sample_count;
         max_played_sample_count += actual_frames_written;
     }
+}
+
+size_t SinkStream::PopFrames(s16* dst, size_t frames) {
+    const size_t frame_size = GetDeviceChannels();
+    const size_t frame_size_bytes = frame_size * sizeof(s16);
+    size_t written{0};
+    size_t actual{0};
+    while (written < frames) {
+        if (playing_buffer.consumed || playing_buffer.frames == 0) {
+            std::unique_lock lk{release_mutex};
+
+            if (!queue.TryPop(playing_buffer)) {
+                lk.unlock();
+                const s16* hold = written > 0 ? &dst[(written - 1) * frame_size] : last_frame.data();
+                for (size_t i = written; i < frames; i++)
+                    std::memcpy(&dst[i * frame_size], hold, frame_size_bytes);
+                NoteIssue(SinkIssue::Underrun, frames - written);
+                written = frames;
+                continue;
+            }
+
+            --queued_buffers;
+            lk.unlock();
+            release_cv.notify_one();
+        }
+
+        const size_t frames_available =
+            std::min<u64>(playing_buffer.frames - playing_buffer.frames_played, frames - written);
+
+        const size_t wanted_samples = frames_available * frame_size;
+        const size_t popped_samples = samples_buffer.Pop(&dst[written * frame_size], wanted_samples);
+        if (popped_samples < wanted_samples) {
+            // The queue promised more samples than the ring holds. Hold the last good frame
+            // instead of leaving whatever the backend had in this buffer, which audibly loops.
+            const size_t popped_frames = popped_samples / frame_size;
+            const s16* hold = (written + popped_frames) > 0
+                                  ? &dst[(written + popped_frames - 1) * frame_size]
+                                  : last_frame.data();
+            for (size_t i = written + popped_frames; i < written + frames_available; i++) {
+                std::memcpy(&dst[i * frame_size], hold, frame_size_bytes);
+            }
+            NoteIssue(SinkIssue::ShortPop, frames_available - popped_frames);
+        }
+
+        written += frames_available;
+        actual += frames_available;
+        playing_buffer.frames_played += frames_available;
+
+        if (playing_buffer.frames_played >= playing_buffer.frames)
+            playing_buffer.consumed = true;
+    }
+    return actual;
+}
+
+double SinkStream::UpdateGamePace() {
+    const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
+    if (now - pace_last_sample_ns < 250'000'000) {
+        return pace_rate;
+    }
+    pace_last_sample_ns = now;
+    const u64 frames = system.GetPerfStats().GetTotalGameFrames();
+
+    // Keep the last 1 s of (time, frame count) samples.
+    if (pace_sample_count == pace_samples.size()) {
+        std::move(pace_samples.begin() + 1, pace_samples.end(), pace_samples.begin());
+        pace_sample_count--;
+    }
+    pace_samples[pace_sample_count++] = {now, frames};
+    if (pace_sample_count < pace_samples.size()) {
+        return pace_rate;
+    }
+    const auto [t0, f0] = pace_samples.front();
+    const double fps = static_cast<double>(frames - f0) * 1e9 / static_cast<double>(now - t0);
+
+    // The usual rate: 60 if the game reached it in the last 10 s, else 30. A steady 30 is
+    // taken as a scene meant to run at 30, not a slow 60.
+    if (pace_fps_count == pace_fps_history.size()) {
+        std::move(pace_fps_history.begin() + 1, pace_fps_history.end(), pace_fps_history.begin());
+        pace_fps_count--;
+    }
+    pace_fps_history[pace_fps_count++] = fps;
+    double recent_max{0.0};
+    for (size_t i = 0; i < pace_fps_count; i++) {
+        recent_max = (std::max)(recent_max, pace_fps_history[i]);
+    }
+    bool steady_30{pace_fps_count >= 6};
+    for (size_t i = pace_fps_count >= 6 ? pace_fps_count - 6 : 0; i < pace_fps_count; i++) {
+        steady_30 = steady_30 && pace_fps_history[i] > 28.0 && pace_fps_history[i] < 32.5;
+    }
+    pace_target_fps = (recent_max >= 50.0 && !steady_30) ? 60.0 : 30.0;
+
+    // Less than 3 % under the usual rate plays at full speed; slower is followed down to 70 %.
+    // No new frames at all (a loading screen or a pause) keeps the last rate.
+    double target_rate = fps <= 1.0 ? pace_rate : std::clamp(fps / pace_target_fps, 0.70, 1.0);
+    if (target_rate > 0.97) {
+        target_rate = 1.0;
+    }
+    pace_rate += (target_rate - pace_rate) * 0.5;
+    if (std::abs(pace_rate - 1.0) < 0.005) {
+        pace_rate = 1.0;
+    }
+    pace_min_rate_since_log = (std::min)(pace_min_rate_since_log, pace_rate);
+
+    if (pace_min_rate_since_log < 1.0 && now - pace_last_log_ns >= 2'000'000'000) {
+        LOG_INFO(Audio_Sink,
+                 "[Kledd] audio pace: game at {:.1f} fps of its usual {:.0f}, sound at {:.0f}% "
+                 "(lowest {:.0f}% since the last report)",
+                 fps, pace_target_fps, pace_rate * 100.0, pace_min_rate_since_log * 100.0);
+        pace_min_rate_since_log = 1.0;
+        pace_last_log_ns = now;
+    }
+    return pace_rate;
 }
 
 void SinkStream::NoteIssue(SinkIssue issue, u64 amount) {

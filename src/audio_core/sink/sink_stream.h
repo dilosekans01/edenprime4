@@ -246,6 +246,14 @@ protected:
      */
     void NoteIssue(SinkIssue issue, u64 amount);
 
+    /// eden-kledd: pop up to `frames` frames from the queue into dst, filling underruns with
+    /// the last frame. Returns the frames that really came from the queue.
+    size_t PopFrames(s16* dst, size_t frames);
+
+    /// eden-kledd: playback rate for the render stream, the game's frame rate over its usual
+    /// one, so the sound slows down with the game instead of running ahead of the picture.
+    double UpdateGamePace();
+
 protected:
     /// Core system
     Core::System& system;
@@ -293,6 +301,20 @@ private:
     std::atomic<s64> last_issue_log_ns{};
     /// When the host callback last ran (touched by the callback thread only)
     std::chrono::steady_clock::time_point last_callback_time{};
+    /// Game pacing (callback thread only): frame counter samples every 250 ms over 1 s,
+    /// recent 1 s rates for the usual-rate guess, and the smoothed playback rate
+    std::array<std::pair<s64, u64>, 5> pace_samples{};
+    size_t pace_sample_count{};
+    std::array<double, 40> pace_fps_history{};
+    size_t pace_fps_count{};
+    s64 pace_last_sample_ns{};
+    double pace_rate{1.0};
+    double pace_target_fps{60.0};
+    double pace_min_rate_since_log{1.0};
+    s64 pace_last_log_ns{};
+    /// Resampler state: frames popped but not yet fully played, and the read position in them
+    std::vector<s16> pace_pending{};
+    double pace_pos{};
     /// Set by the audio render/in/out system which uses this stream
     f32 system_volume{1.0f};
     /// Set via IAudioDevice service calls
