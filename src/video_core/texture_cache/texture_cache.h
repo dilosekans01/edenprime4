@@ -238,6 +238,7 @@ void TextureCache<P>::KleddLogLongFrame() {
     const u64 plain_ms = take(s.plain_upload_us) / 1000;
     const u64 plain_max_ms = take(s.plain_upload_max_us) / 1000;
     const u64 plain_max_bytes = take(s.plain_upload_max_bytes);
+    const KleddSlowUpload slow = std::exchange(kledd_slow_upload, KleddSlowUpload{});
 
     const auto now = std::chrono::steady_clock::now();
     const auto last = std::exchange(kledd_last_frame, now);
@@ -260,6 +261,19 @@ void TextureCache<P>::KleddLogLongFrame() {
              decodes, unswizzles, gfx_pipelines, cmp_pipelines, total_used_memory / MiB,
              expected_memory / MiB, critical_memory / MiB, insert_ms, create_ms, refresh_ms,
              plain_ms, plain_max_ms, plain_max_bytes / MiB);
+    if (slow.total_us >= 20'000) {
+        const auto& si = slow.info;
+        LOG_INFO(HW_GPU,
+                 "[Kledd] slowest upload {} ms: image {:#x} {}x{}x{} type {} fmt {} levels {} "
+                 "layers {} block {}/{}/{} {} KiB guest, flags {:#x} | staging {} ms, read {} ms, "
+                 "unswizzle {} ms, record {} ms, barrier {} ms",
+                 slow.total_us / 1000, slow.gpu_addr, si.size.width, si.size.height,
+                 si.size.depth, static_cast<u32>(si.type), static_cast<u32>(si.format),
+                 si.resources.levels, si.resources.layers, si.block.width, si.block.height,
+                 si.block.depth, slow.guest_bytes >> 10, slow.flags, slow.staging_us / 1000,
+                 slow.read_us / 1000, slow.unswizzle_us / 1000, slow.record_us / 1000,
+                 slow.barrier_us / 1000);
+    }
 }
 
 template <class P>
@@ -1399,15 +1413,38 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     kledd_stats.uploads.fetch_add(1, std::memory_order_relaxed);
     kledd_stats.upload_bytes.fetch_add(MapSizeBytes(image), std::memory_order_relaxed);
     KleddNoteBigUpload(image);
-    const auto plain_start = std::chrono::steady_clock::now();
+    using KleddClock = std::chrono::steady_clock;
+    const auto us_since = [](KleddClock::time_point t) {
+        return static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::microseconds>(KleddClock::now() - t).count());
+    };
+    const auto plain_start = KleddClock::now();
     auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
+    const u64 staging_us = us_since(plain_start);
+    kledd_step_read_us = kledd_step_unswizzle_us = kledd_step_record_us = 0;
     UploadImageContents(image, staging);
+    const auto barrier_start = KleddClock::now();
     runtime.InsertUploadMemoryBarrier();
-    const u64 plain_us = Common::Kledd::AddElapsedUs<std::chrono::steady_clock>(
-        kledd_stats.plain_upload_us, plain_start);
+    const u64 barrier_us = us_since(barrier_start);
+    const u64 plain_us = Common::Kledd::AddElapsedUs<KleddClock>(kledd_stats.plain_upload_us,
+                                                                 plain_start);
     if (plain_us > kledd_stats.plain_upload_max_us.load(std::memory_order_relaxed)) {
         kledd_stats.plain_upload_max_us.store(plain_us, std::memory_order_relaxed);
         kledd_stats.plain_upload_max_bytes.store(MapSizeBytes(image), std::memory_order_relaxed);
+    }
+    if (plain_us > kledd_slow_upload.total_us) {
+        kledd_slow_upload = KleddSlowUpload{
+            .total_us = plain_us,
+            .staging_us = staging_us,
+            .read_us = kledd_step_read_us,
+            .unswizzle_us = kledd_step_unswizzle_us,
+            .record_us = kledd_step_record_us,
+            .barrier_us = barrier_us,
+            .info = image.info,
+            .gpu_addr = image.gpu_addr,
+            .flags = static_cast<u32>(image.flags),
+            .guest_bytes = image.guest_size_bytes,
+        };
     }
 }
 
@@ -1943,17 +1980,30 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
         return;
     }
 
+    using KleddClock = std::chrono::steady_clock;
+    const auto us_since = [](KleddClock::time_point t) {
+        return static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::microseconds>(KleddClock::now() - t).count());
+    };
+    auto step = KleddClock::now();
     Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(
         *gpu_memory, gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
+    kledd_step_read_us = us_since(step);
+    step = KleddClock::now();
     if (True(image.flags & ImageFlagBits::Converted)) {
         unswizzle_data_buffer.resize_destructive(image.unswizzled_size_bytes);
         auto copies = UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data, unswizzle_data_buffer);
         ConvertImage(unswizzle_data_buffer, image.info, mapped_span, copies);
+        kledd_step_unswizzle_us = us_since(step);
+        step = KleddClock::now();
         image.UploadMemory(staging, copies);
     } else {
         const auto copies = UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data, mapped_span);
+        kledd_step_unswizzle_us = us_since(step);
+        step = KleddClock::now();
         image.UploadMemory(staging, copies);
     }
+    kledd_step_record_us = us_since(step);
 }
 
 template <class P>

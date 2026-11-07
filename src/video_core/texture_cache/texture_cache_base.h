@@ -336,6 +336,24 @@ private:
     /// eden-kledd: log the previous frame if it took too long, then reset the frame counters
     void KleddLogLongFrame();
     std::chrono::steady_clock::time_point kledd_last_frame{};
+    /// eden-kledd: the slowest whole-image upload of the frame, split into its steps
+    struct KleddSlowUpload {
+        u64 total_us = 0;
+        u64 staging_us = 0;
+        u64 read_us = 0;
+        u64 unswizzle_us = 0;
+        u64 record_us = 0;
+        u64 barrier_us = 0;
+        ImageInfo info{};
+        GPUVAddr gpu_addr = 0;
+        u32 flags = 0;
+        u64 guest_bytes = 0;
+    };
+    KleddSlowUpload kledd_slow_upload{};
+    /// Step times of the UploadImageContents call in progress
+    u64 kledd_step_read_us = 0;
+    u64 kledd_step_unswizzle_us = 0;
+    u64 kledd_step_record_us = 0;
 
 public:
 
