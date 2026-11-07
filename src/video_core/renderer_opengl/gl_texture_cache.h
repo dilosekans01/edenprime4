@@ -79,6 +79,11 @@ public:
 
     StagingBufferMap UploadStagingBuffer(size_t size, bool deferred = false);
 
+    /// eden-kledd: the Vulkan runtime keeps a reserve for texture pool uploads; not here
+    StagingBufferMap KleddUploadStagingBuffer(size_t size) {
+        return UploadStagingBuffer(size);
+    }
+
     StagingBufferMap DownloadStagingBuffer(size_t size, bool deferred = false);
 
     void FreeDeferredStagingBuffer(StagingBufferMap& buffer);

@@ -324,6 +324,7 @@ private:
     std::unique_ptr<Common::ThreadWorker> kledd_upload_workers;
     size_t kledd_upload_worker_count = 0;
     std::vector<Common::ScratchBuffer<u8>> kledd_upload_scratch;
+    void KleddStartUploadWorkers();
     /// True when any page of the z group's GPU range is mapped (always for non-sparse images)
     bool KleddGroupMapped(const ImageBase& image, const KleddWatch& watch, u32 group);
     /// Uploads the given z groups: mapped ones are read and unswizzled through bounded staging

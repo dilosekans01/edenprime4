@@ -40,6 +40,15 @@ public:
     StagingBufferRef Request(size_t size, MemoryUsage usage, bool deferred = false);
     void FreeDeferred(StagingBufferRef& ref);
 
+    /// eden-kledd: an upload buffer of at most KLEDD_RESERVE_BUFFER_SIZE bytes from a reserve that
+    /// is allocated and touched once and never freed, for the big texture pool uploads. They
+    /// would otherwise fill the stream ring, so the uploads after them land on freshly allocated
+    /// buffers, which are slow on first use and are freed again a few frames later.
+    StagingBufferRef RequestKleddUpload(size_t size);
+    static constexpr size_t KLEDD_RESERVE_BUFFER_SIZE = 16ULL << 20;
+    static constexpr size_t KLEDD_RESERVE_PREWARM = 24;
+    static constexpr size_t KLEDD_RESERVE_MAX = 40;
+
     [[nodiscard]] VkBuffer StreamBuf() const noexcept {
         return *stream_buffer;
     }
@@ -122,6 +131,11 @@ private:
     StagingBuffersCache device_local_cache;
     StagingBuffersCache upload_cache;
     StagingBuffersCache download_cache;
+
+    /// eden-kledd: see RequestKleddUpload
+    std::vector<StagingBuffer> kledd_reserve;
+    size_t kledd_reserve_next = 0;
+    bool AddKleddReserveBuffer();
 
     size_t current_delete_level = 0;
     u64 buffer_index = 0;

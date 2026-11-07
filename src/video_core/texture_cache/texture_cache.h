@@ -59,6 +59,10 @@ TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManag
     swizzle_data_buffer.resize_destructive(SWIZZLE_DATA_BUFFER_INITIAL_CAPACITY);
     unswizzle_data_buffer.resize_destructive(UNSWIZZLE_DATA_BUFFER_INITIAL_CAPACITY);
 
+    // eden-kledd: start the pool upload workers now and touch their read buffers, so the first
+    // texture pool of a scene does not pay for thread start-up and fresh pages
+    KleddStartUploadWorkers();
+
     // Make sure the first index is reserved for the null resources
     // This way the null resource becomes a compile time constant
     void(slot_images.insert(NullImageParams{}));
@@ -1668,7 +1672,7 @@ typename TextureCache<P>::KleddUploadStats TextureCache<P>::KleddUploadGroups(
             : static_cast<size_t>(request_budget / host_group_bytes);
     const auto stage = [&](u64 bytes) {
         stats.staged_bytes += bytes;
-        return runtime.UploadStagingBuffer(static_cast<size_t>(bytes));
+        return runtime.KleddUploadStagingBuffer(static_cast<size_t>(bytes));
     };
 
     // A group without a mapped page reads as zeros, so it is filled from one zeroed staging
@@ -1697,11 +1701,7 @@ typename TextureCache<P>::KleddUploadStats TextureCache<P>::KleddUploadGroups(
     // one batch are spread over worker threads. Staging buffers are taken and handed to the GPU
     // on this thread only, in order.
     if (!mapped.empty() && !kledd_upload_workers) {
-        const size_t hw = (std::max)(std::thread::hardware_concurrency(), 2U);
-        kledd_upload_worker_count = std::clamp<size_t>(hw / 2, 2, 8);
-        kledd_upload_workers =
-            std::make_unique<Common::ThreadWorker>(kledd_upload_worker_count, "KleddUnswizzle");
-        kledd_upload_scratch.resize(kledd_upload_worker_count);
+        KleddStartUploadWorkers();
     }
     const size_t num_requests = Common::DivCeil(mapped.size(), groups_per_request);
     stats.threads = static_cast<u32>((std::min)(kledd_upload_worker_count, num_requests));
@@ -1755,6 +1755,19 @@ typename TextureCache<P>::KleddUploadStats TextureCache<P>::KleddUploadGroups(
     }
     runtime.InsertUploadMemoryBarrier();
     return stats;
+}
+
+template <class P>
+void TextureCache<P>::KleddStartUploadWorkers() {
+    const size_t hw = (std::max)(std::thread::hardware_concurrency(), 2U);
+    kledd_upload_worker_count = std::clamp<size_t>(hw / 2, 2, 8);
+    kledd_upload_workers =
+        std::make_unique<Common::ThreadWorker>(kledd_upload_worker_count, "KleddUnswizzle");
+    kledd_upload_scratch.resize(kledd_upload_worker_count);
+    for (auto& scratch : kledd_upload_scratch) {
+        scratch.resize_destructive(16_MiB);
+        std::memset(scratch.data(), 0, 16_MiB);
+    }
 }
 
 template <class P>

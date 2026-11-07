@@ -54,6 +54,11 @@ public:
 
     StagingBufferRef UploadStagingBuffer(size_t size, bool deferred = false);
 
+    /// eden-kledd: staging for the texture pool uploads, from a reserve kept for them
+    StagingBufferRef KleddUploadStagingBuffer(size_t size) {
+        return staging_buffer_pool.RequestKleddUpload(size);
+    }
+
     StagingBufferRef DownloadStagingBuffer(size_t size, bool deferred = false);
 
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);

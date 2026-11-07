@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <cstring>
 #include <utility>
 #include <vector>
 
@@ -15,6 +16,7 @@
 #include "common/bit_util.h"
 #include "common/common_types.h"
 #include "common/literals.h"
+#include "common/logging.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -96,6 +98,69 @@ StagingBufferPool::StagingBufferPool(const Device& device_, MemoryAllocator& mem
     }
     stream_pointer = stream_buffer.Mapped();
     ASSERT_MSG(!stream_pointer.empty(), "Stream buffer must be host visible!");
+
+    for (size_t i = 0; i < KLEDD_RESERVE_PREWARM; ++i) {
+        if (!AddKleddReserveBuffer()) {
+            break;
+        }
+    }
+    LOG_INFO(Render_Vulkan, "[Kledd] texture pool upload reserve: {} buffers of {} MiB",
+             kledd_reserve.size(), KLEDD_RESERVE_BUFFER_SIZE >> 20);
+}
+
+bool StagingBufferPool::AddKleddReserveBuffer() {
+    VkBufferCreateInfo buffer_ci = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .size = KLEDD_RESERVE_BUFFER_SIZE,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+    };
+    vk::Buffer buffer = memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::Upload);
+    const std::span<u8> mapped_span = buffer.Mapped();
+    if (mapped_span.size() < KLEDD_RESERVE_BUFFER_SIZE) {
+        return false;
+    }
+    // Touch every page now, so the first pool upload does not pay for it
+    std::memset(mapped_span.data(), 0, KLEDD_RESERVE_BUFFER_SIZE);
+    kledd_reserve.push_back(StagingBuffer{
+        .buffer = std::move(buffer),
+        .device_address = VkDeviceAddress{},
+        .mapped_span = mapped_span,
+        .usage = MemoryUsage::Upload,
+        .log2_level = 0,
+        .index = unique_ids++,
+        .tick = 0,
+        .deferred = false,
+    });
+    return true;
+}
+
+StagingBufferRef StagingBufferPool::RequestKleddUpload(size_t size) {
+    if (size <= KLEDD_RESERVE_BUFFER_SIZE) {
+        const size_t count = kledd_reserve.size();
+        for (size_t i = 0; i < count; ++i) {
+            StagingBuffer& entry = kledd_reserve[(kledd_reserve_next + i) % count];
+            if (scheduler.IsFree(entry.tick)) {
+                kledd_reserve_next = (kledd_reserve_next + i + 1) % count;
+                entry.tick = scheduler.CurrentTick();
+                StagingBufferRef ref = entry.Ref();
+                ref.mapped_span = entry.mapped_span.subspan(0, size);
+                return ref;
+            }
+        }
+        if (count < KLEDD_RESERVE_MAX && AddKleddReserveBuffer()) {
+            StagingBuffer& entry = kledd_reserve.back();
+            entry.tick = scheduler.CurrentTick();
+            StagingBufferRef ref = entry.Ref();
+            ref.mapped_span = entry.mapped_span.subspan(0, size);
+            return ref;
+        }
+    }
+    return Request(size, MemoryUsage::Upload);
 }
 
 StagingBufferPool::~StagingBufferPool() = default;
