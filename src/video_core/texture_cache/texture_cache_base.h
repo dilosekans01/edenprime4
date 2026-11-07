@@ -282,6 +282,9 @@ private:
         std::vector<u8> tracked;
         std::vector<u8> dirty;
         u32 dirty_by_remap = 0;
+        /// Bytes covered by the remap events and write faults since the last upload (log only)
+        u64 remapped_bytes = 0;
+        u32 dirty_by_write = 0;
         u32 views_rebuilt = 0;
         /// GPU ranges of the image whose page mapping changed; their map views are rebuilt from
         /// the page table before their groups are protected again
@@ -313,7 +316,14 @@ private:
         u32 read = 0;        ///< groups read from guest memory and unswizzled
         u32 zero_filled = 0; ///< groups without a mapped page, filled with zeros on the GPU
         u64 staged_bytes = 0;
+        u64 unswizzle_us = 0; ///< wall time spent reading and unswizzling on the workers
+        u32 threads = 1;
     };
+    /// Workers that read and unswizzle the groups of one upload in parallel, with one guest
+    /// read buffer per request slot
+    std::unique_ptr<Common::ThreadWorker> kledd_upload_workers;
+    size_t kledd_upload_worker_count = 0;
+    std::vector<Common::ScratchBuffer<u8>> kledd_upload_scratch;
     /// True when any page of the z group's GPU range is mapped (always for non-sparse images)
     bool KleddGroupMapped(const ImageBase& image, const KleddWatch& watch, u32 group);
     /// Uploads the given z groups: mapped ones are read and unswizzled through bounded staging

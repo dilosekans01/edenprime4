@@ -1485,6 +1485,7 @@ void TextureCache<P>::KleddMarkRemapped(ImageId image_id, const ImageBase& image
         return;
     }
     watch.dirty_by_remap++;
+    watch.remapped_bytes += end - begin;
     KleddMarkGroups(image_id, image, watch, begin - image_begin, end - image_begin);
     // The page table entry is still being written when this is called, so the new mapping is
     // read later, by KleddRebuildViews. Pages of one map call arrive in order: merge them.
@@ -1577,6 +1578,7 @@ void TextureCache<P>::KleddMarkWritten(ImageId image_id, const ImageBase& image,
     // The protection fault reports the access; round it out to whole pages, because a page that
     // straddles two groups can carry bytes of both.
     constexpr u64 page = Core::Memory::YUZU_PAGESIZE;
+    watch.dirty_by_write++;
     const auto mark = [&](u64 offset_begin, u64 offset_end) {
         KleddMarkGroups(image_id, image, watch, offset_begin, offset_end);
     };
@@ -1668,26 +1670,65 @@ typename TextureCache<P>::KleddUploadStats TextureCache<P>::KleddUploadGroups(
         image.UploadMemory(staging, copies);
         stats.zero_filled = static_cast<u32>(unmapped.size());
     }
-    for (size_t first = 0; first < mapped.size(); first += groups_per_request) {
-        const size_t count = (std::min)(groups_per_request, mapped.size() - first);
-        auto staging = stage(host_group_bytes * count);
+    // Reading and unswizzling a group is plain CPU work on its own memory, so the requests of
+    // one batch are spread over worker threads. Staging buffers are taken and handed to the GPU
+    // on this thread only, in order.
+    if (!mapped.empty() && !kledd_upload_workers) {
+        const size_t hw = (std::max)(std::thread::hardware_concurrency(), 2U);
+        kledd_upload_worker_count = std::clamp<size_t>(hw / 2, 2, 8);
+        kledd_upload_workers =
+            std::make_unique<Common::ThreadWorker>(kledd_upload_worker_count, "KleddUnswizzle");
+        kledd_upload_scratch.resize(kledd_upload_worker_count);
+    }
+    const size_t num_requests = Common::DivCeil(mapped.size(), groups_per_request);
+    stats.threads = static_cast<u32>((std::min)(kledd_upload_worker_count, num_requests));
+    using Staging = decltype(stage(0));
+    struct Request {
+        std::optional<Staging> staging;
         boost::container::small_vector<BufferImageCopy, 16> copies;
-        size_t host_offset = 0;
-        for (size_t i = 0; i < count; ++i) {
-            const u32 group = mapped[first + i];
-            const u32 z_start = group * watch.group_slices;
-            const u32 z_count = (std::min)(watch.group_slices, info.size.depth - z_start);
-            Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> guest(
-                *gpu_memory, image.gpu_addr + group * watch.group_bytes, watch.group_bytes,
-                &swizzle_data_buffer);
-            const std::span<const u8> input(guest.data(), watch.group_bytes);
-            copies.push_back(UnswizzleImageSliceGroup(
-                info, input, staging.mapped_span.subspan(host_offset, host_group_bytes), z_start,
-                z_count, host_offset));
-            host_offset += static_cast<size_t>(host_group_bytes);
+    };
+    std::vector<Request> batch(kledd_upload_worker_count);
+    for (size_t first_request = 0; first_request < num_requests;
+         first_request += kledd_upload_worker_count) {
+        const size_t batch_size = (std::min)(kledd_upload_worker_count, num_requests - first_request);
+        for (size_t slot = 0; slot < batch_size; ++slot) {
+            const size_t first = (first_request + slot) * groups_per_request;
+            const size_t count = (std::min)(groups_per_request, mapped.size() - first);
+            Request& request = batch[slot];
+            request.copies.clear();
+            request.staging.emplace(stage(host_group_bytes * count));
+            const std::span<u8> out = request.staging->mapped_span;
+            Common::ScratchBuffer<u8>* scratch = &kledd_upload_scratch[slot];
+            kledd_upload_workers->QueueWork([this, &info, &watch, &image, &mapped, &request, out,
+                                             scratch, first, count, host_group_bytes] {
+                size_t host_offset = 0;
+                for (size_t i = 0; i < count; ++i) {
+                    const u32 group = mapped[first + i];
+                    const u32 z_start = group * watch.group_slices;
+                    const u32 z_count = (std::min)(watch.group_slices, info.size.depth - z_start);
+                    Tegra::Memory::GpuGuestMemory<u8,
+                                                  Tegra::Memory::GuestMemoryFlags::UnsafeRead>
+                        guest(*gpu_memory, image.gpu_addr + group * watch.group_bytes,
+                              watch.group_bytes, scratch);
+                    const std::span<const u8> input(guest.data(), watch.group_bytes);
+                    request.copies.push_back(UnswizzleImageSliceGroup(
+                        info, input, out.subspan(host_offset, host_group_bytes), z_start, z_count,
+                        host_offset));
+                    host_offset += static_cast<size_t>(host_group_bytes);
+                }
+            });
+            stats.read += static_cast<u32>(count);
         }
-        image.UploadMemory(staging, copies);
-        stats.read += static_cast<u32>(count);
+        const auto work_start = std::chrono::steady_clock::now();
+        kledd_upload_workers->WaitForRequests();
+        stats.unswizzle_us += static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - work_start)
+                .count());
+        for (size_t slot = 0; slot < batch_size; ++slot) {
+            image.UploadMemory(*batch[slot].staging, batch[slot].copies);
+            batch[slot].staging.reset();
+        }
     }
     runtime.InsertUploadMemoryBarrier();
     return stats;
@@ -1800,15 +1841,19 @@ bool TextureCache<P>::KleddTryDeltaUpload(Image& image, ImageId image_id) {
     }
     LOG_INFO(HW_GPU,
              "[Kledd] {} upload image {:#x} {}x{}x{} fmt {}: {} of {} z groups written ({} of "
-             "{} MiB read, {} groups zero-filled, {} remap events, {} views rebuilt, {} MiB "
-             "staged), {} ms",
+             "{} MiB read, {} groups zero-filled, {} remap events covering {} KiB, {} write "
+             "faults, {} views rebuilt, {} MiB staged, unswizzle {} ms on {} threads), {} ms",
              first ? "first" : (full ? "full" : "delta"), image.gpu_addr, info.size.width,
              info.size.height, info.size.depth, static_cast<u32>(info.format), changed.size(),
              watch->num_groups, read_bytes >> 20, guest_bytes >> 20, stats.zero_filled,
-             watch->dirty_by_remap, watch->views_rebuilt, stats.staged_bytes >> 20,
+             watch->dirty_by_remap, watch->remapped_bytes >> 10, watch->dirty_by_write,
+             watch->views_rebuilt, stats.staged_bytes >> 20, stats.unswizzle_us / 1000,
+             stats.threads,
              std::chrono::duration_cast<std::chrono::milliseconds>(upload_end - upload_start)
                  .count());
     watch->dirty_by_remap = 0;
+    watch->remapped_bytes = 0;
+    watch->dirty_by_write = 0;
     watch->views_rebuilt = 0;
     return true;
 }
