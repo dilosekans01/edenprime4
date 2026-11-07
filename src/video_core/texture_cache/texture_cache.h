@@ -20,6 +20,7 @@
 
 #include "common/alignment.h"
 #include "common/kledd_frame_stats.h"
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/slot_vector.h"
 #include "video_core/control/channel_state.h"
@@ -227,6 +228,12 @@ void TextureCache<P>::KleddLogLongFrame() {
     const u32 unswizzles = take(s.async_unswizzles);
     const u32 gfx_pipelines = take(s.graphics_pipelines);
     const u32 cmp_pipelines = take(s.compute_pipelines);
+    const u64 insert_ms = take(s.insert_us) / 1000;
+    const u64 create_ms = take(s.create_us) / 1000;
+    const u64 refresh_ms = take(s.refresh_us) / 1000;
+    const u64 plain_ms = take(s.plain_upload_us) / 1000;
+    const u64 plain_max_ms = take(s.plain_upload_max_us) / 1000;
+    const u64 plain_max_bytes = take(s.plain_upload_max_bytes);
 
     const auto now = std::chrono::steady_clock::now();
     const auto last = std::exchange(kledd_last_frame, now);
@@ -242,10 +249,13 @@ void TextureCache<P>::KleddLogLongFrame() {
     LOG_INFO(HW_GPU,
              "[Kledd] long frame {} ms | images new {} deleted {} (gc {}, gc sync downloads {}, "
              "join drops {}) | uploads {} ({} MiB) async decode {} unswizzle {} | pipelines "
-             "built gfx {} compute {} | texture memory {}/{}/{} MiB (used/expected/critical)",
+             "built gfx {} compute {} | texture memory {}/{}/{} MiB (used/expected/critical) | "
+             "time: new images {} ms (creating {} ms), uploads {} ms (whole-image {} ms, "
+             "slowest {} ms for {} MiB)",
              ms, created, deleted, gc_deleted, gc_sync, join_dropped, uploads, upload_bytes / MiB,
              decodes, unswizzles, gfx_pipelines, cmp_pipelines, total_used_memory / MiB,
-             expected_memory / MiB, critical_memory / MiB);
+             expected_memory / MiB, critical_memory / MiB, insert_ms, create_ms, refresh_ms,
+             plain_ms, plain_max_ms, plain_max_bytes / MiB);
 }
 
 template <class P>
@@ -1338,6 +1348,12 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         // Only upload modified images
         return;
     }
+    using KleddClock = std::chrono::steady_clock;
+    const auto kledd_refresh_start = KleddClock::now();
+    SCOPE_EXIT {
+        Common::Kledd::AddElapsedUs<KleddClock>(Common::Kledd::GetFrameStats().refresh_us,
+                                                kledd_refresh_start);
+    };
 
     image.flags &= ~ImageFlagBits::CpuModified;
 
@@ -1379,9 +1395,16 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     kledd_stats.uploads.fetch_add(1, std::memory_order_relaxed);
     kledd_stats.upload_bytes.fetch_add(MapSizeBytes(image), std::memory_order_relaxed);
     KleddNoteBigUpload(image);
+    const auto plain_start = std::chrono::steady_clock::now();
     auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
     UploadImageContents(image, staging);
     runtime.InsertUploadMemoryBarrier();
+    const u64 plain_us = Common::Kledd::AddElapsedUs<std::chrono::steady_clock>(
+        kledd_stats.plain_upload_us, plain_start);
+    if (plain_us > kledd_stats.plain_upload_max_us.load(std::memory_order_relaxed)) {
+        kledd_stats.plain_upload_max_us.store(plain_us, std::memory_order_relaxed);
+        kledd_stats.plain_upload_max_bytes.store(MapSizeBytes(image), std::memory_order_relaxed);
+    }
 }
 
 template <class P>
@@ -2270,7 +2293,10 @@ ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
         }
     }
     ASSERT_MSG(cpu_addr, "Tried to insert an image to an invalid gpu_addr={:#x}", gpu_addr);
+    const auto kledd_insert_start = std::chrono::steady_clock::now();
     const ImageId image_id = JoinImages(info, gpu_addr, *cpu_addr);
+    Common::Kledd::AddElapsedUs<std::chrono::steady_clock>(
+        Common::Kledd::GetFrameStats().insert_us, kledd_insert_start);
     const Image& image = slot_images[image_id];
     // Using "image.gpu_addr" instead of "gpu_addr" is important because it might be different
     const auto [it, is_new] = image_allocs_table.try_emplace(image.gpu_addr);
@@ -2378,9 +2404,12 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         }
     }
 
+    const auto kledd_create_start = std::chrono::steady_clock::now();
     const ImageId new_image_id = slot_images.insert(runtime, new_info, gpu_addr, cpu_addr);
     Image& new_image = slot_images[new_image_id];
     Common::Kledd::GetFrameStats().images_created.fetch_add(1, std::memory_order_relaxed);
+    Common::Kledd::AddElapsedUs<std::chrono::steady_clock>(
+        Common::Kledd::GetFrameStats().create_us, kledd_create_start);
 
     new_image.allocation_tick = frame_tick;
 
