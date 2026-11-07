@@ -76,7 +76,7 @@ public:
 
     void SetCommandBuffer(s32 session_id, CpuAddr buffer, u64 size, u64 time_limit,
                           u64 applet_resource_user_id, Kernel::KProcess* process,
-                          bool reset) noexcept;
+                          bool reset, bool muted = false) noexcept;
     u32 GetRemainCommandCount(s32 session_id) const noexcept;
     void ClearRemainCommandCount(s32 session_id) noexcept;
     u64 GetRenderingStartTick(s32 session_id) const noexcept;

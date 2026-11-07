@@ -85,6 +85,8 @@ public:
     Sink::SinkStream* stream{};
     /// Header info for this command list
     Renderer::CommandListHeader* header{};
+    /// eden-kledd: the device sink outputs silence for this list (voices still advance)
+    bool muted{};
     /// The command buffer
     u8* commands{};
     /// The command buffer size

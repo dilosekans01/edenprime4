@@ -612,19 +612,21 @@ void System::SendCommandToDsp() {
             u64 command_size{0};
 
             // eden-kledd: a game that has stopped calling RequestUpdate (loading hitch, starved
-            // audio thread) has fallen behind the DSP. Hardware would render on and loop whatever
-            // the game could not refill; hold instead, so the sound pauses and resumes in step
-            // with the game. The event is still signalled so the game can catch up.
+            // audio thread) has fallen behind the DSP. Rendering on would loop whatever streaming
+            // buffer the game could not refill, which is the buzz. Pausing the renderer instead
+            // stopped the buzz but left the voices behind the game's clock for good, so real-time
+            // cutscenes drifted out of lip sync with every hitch. Render on so the voices keep
+            // real time, and send silence to the device until the game updates again.
+            bool muted{false};
             if (remaining_command_count == 0 && num_times_updated > 0) {
                 const u32 usual_gap{*std::min_element(update_gaps.begin(), update_gaps.end())};
                 const u32 hold_after{(std::max)(4u, usual_gap * 3)};
                 if (frames_since_update >= hold_after) {
-                    frames_since_update++;
+                    muted = true;
                     held_frames_since_log++;
-                    longest_gap_since_log = (std::max)(longest_gap_since_log, frames_since_update);
+                    longest_gap_since_log =
+                        (std::max)(longest_gap_since_log, frames_since_update + 1);
                     LogHoldIfDue();
-                    adsp_rendered_event->Signal(core.Kernel());
-                    return;
                 }
             }
             frames_since_update++;
@@ -655,7 +657,7 @@ void System::SendCommandToDsp() {
                                  (static_cast<f32>(render_time_limit_percent) / 100.0f))};
             audio_renderer.SetCommandBuffer(session_id, translated_addr, command_size, time_limit,
                                             applet_resource_user_id, process_handle,
-                                            reset_command_buffers);
+                                            reset_command_buffers, muted);
             reset_command_buffers = false;
             command_buffer_size = command_size;
             if (remaining_command_count == 0) {
@@ -678,7 +680,7 @@ void System::LogHoldIfDue() {
     const u64 opus_calls{::AudioCore::OpusDecoder::Stats::decode_calls.load()};
     const u64 opus_us{::AudioCore::OpusDecoder::Stats::decode_microseconds.load()};
     LOG_WARNING(Service_Audio,
-                "Audio renderer session {}: game late with updates, held {} frames ({} ms), "
+                "Audio renderer session {}: game late with updates, muted {} frames ({} ms), "
                 "longest gap {} frames, usual gap {} frames; opus decodes since last report {} "
                 "({} ms)",
                 session_id, held_frames_since_log, held_frames_since_log * 5,

@@ -20,6 +20,8 @@ struct CommandBuffer {
     u64 applet_resource_user_id{};
     Kernel::KProcess* process{};
     bool reset_buffer{};
+    // eden-kledd: render the list but send silence to the device (game late with updates)
+    bool muted{};
     // Set by the DSP
     u32 remaining_command_count{};
     u64 render_time_taken_us{};

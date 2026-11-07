@@ -90,13 +90,14 @@ u32 AudioRenderer::Receive(Direction dir) {
 
 void AudioRenderer::SetCommandBuffer(s32 session_id, CpuAddr buffer, u64 size, u64 time_limit,
                                      u64 applet_resource_user_id, Kernel::KProcess* process,
-                                     bool reset) noexcept {
+                                     bool reset, bool muted) noexcept {
     command_buffers[session_id].buffer = buffer;
     command_buffers[session_id].size = size;
     command_buffers[session_id].time_limit = time_limit;
     command_buffers[session_id].applet_resource_user_id = applet_resource_user_id;
     command_buffers[session_id].process = process;
     command_buffers[session_id].reset_buffer = reset;
+    command_buffers[session_id].muted = muted;
 }
 
 void AudioRenderer::PostDSPClearCommandBuffer() noexcept {
@@ -201,6 +202,7 @@ void AudioRenderer::Main(std::stop_token stop_token) {
 
                     max_time = (std::min)(command_buffer.time_limit, max_time);
                     command_list_processor.SetProcessTimeMax(max_time);
+                    command_list_processor.muted = command_buffer.muted;
 
                     if (index == 0) {
                         streams[index]->WaitFreeSpace(stop_token);
