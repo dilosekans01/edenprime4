@@ -210,6 +210,7 @@ add_library(audio_core STATIC
     sink/sink_details.h
     sink/sink_stream.cpp
     sink/sink_stream.h
+    sink/kledd_time_stretch.h
 )
 
 if (MSVC)

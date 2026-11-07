@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "audio_core/common/common.h"
+#include "audio_core/sink/kledd_time_stretch.h"
 #include "common/bounded_threadsafe_queue.h"
 #include "common/common_types.h"
 #include "common/polyfill_thread.h"
@@ -312,9 +313,8 @@ private:
     double pace_target_fps{60.0};
     double pace_min_rate_since_log{1.0};
     s64 pace_last_log_ns{};
-    /// Resampler state: frames popped but not yet fully played, and the read position in them
-    std::vector<s16> pace_pending{};
-    double pace_pos{};
+    /// Slows the render stream down to the game's pace without lowering its pitch
+    KleddTimeStretch pace_stretch{};
     /// Set by the audio render/in/out system which uses this stream
     f32 system_volume{1.0f};
     /// Set via IAudioDevice service calls

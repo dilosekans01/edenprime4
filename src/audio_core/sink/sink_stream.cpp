@@ -225,34 +225,11 @@ void SinkStream::ProcessAudioOutAndRender(std::span<s16> output_buffer, std::siz
         // frames than usual, its cutscene timeline moves slower than real time, and sound
         // played at full speed runs ahead of the lips. Consuming the queue at the same rate
         // also holds back the DSP (it waits for free space), so the voices advance in step.
-        // At full speed the rate is exactly 1 and this is a plain copy, one frame behind.
+        // The time stretch keeps the pitch; at full speed it passes the sound through exactly.
         const double rate = UpdateGamePace();
-        size_t pending_frames = pace_pending.size() / frame_size;
-        const size_t needed =
-            static_cast<size_t>(pace_pos + static_cast<double>(num_frames - 1) * rate) + 2;
-        if (needed > pending_frames) {
-            pace_pending.resize(needed * frame_size);
-            actual_frames_written =
-                PopFrames(&pace_pending[pending_frames * frame_size], needed - pending_frames);
-            pending_frames = needed;
-        }
-        for (size_t i = 0; i < num_frames; i++) {
-            const double p = pace_pos + static_cast<double>(i) * rate;
-            const size_t k = static_cast<size_t>(p);
-            const double frac = p - static_cast<double>(k);
-            const s16* a = &pace_pending[k * frame_size];
-            const s16* b = &pace_pending[(k + 1) * frame_size];
-            for (size_t c = 0; c < frame_size; c++) {
-                output_buffer[i * frame_size + c] = static_cast<s16>(
-                    static_cast<double>(a[c]) +
-                    (static_cast<double>(b[c]) - static_cast<double>(a[c])) * frac);
-            }
-        }
-        const double end = pace_pos + static_cast<double>(num_frames) * rate;
-        const size_t drop = (std::min)(static_cast<size_t>(end), pending_frames - 1);
-        pace_pending.erase(pace_pending.begin(),
-                           pace_pending.begin() + static_cast<std::ptrdiff_t>(drop * frame_size));
-        pace_pos = end - static_cast<double>(drop);
+        actual_frames_written = pace_stretch.Process(
+            output_buffer.data(), num_frames, frame_size, rate,
+            [this](s16* dst, size_t frames) { return PopFrames(dst, frames); });
         frames_written = num_frames;
     }
 
