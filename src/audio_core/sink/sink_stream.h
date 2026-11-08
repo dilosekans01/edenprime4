@@ -306,7 +306,7 @@ private:
     /// recent 1 s rates for the usual-rate guess, and the smoothed playback rate
     std::array<std::pair<s64, u64>, 5> pace_samples{};
     size_t pace_sample_count{};
-    std::array<double, 40> pace_fps_history{};
+    std::array<double, 240> pace_fps_history{};
     size_t pace_fps_count{};
     s64 pace_last_sample_ns{};
     double pace_rate{1.0};

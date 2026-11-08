@@ -315,8 +315,9 @@ double SinkStream::UpdateGamePace() {
     const auto [t0, f0] = pace_samples.front();
     const double fps = static_cast<double>(frames - f0) * 1e9 / static_cast<double>(now - t0);
 
-    // The usual rate: 60 if the game reached it in the last 10 s, else 30. A steady 30 is
-    // taken as a scene meant to run at 30, not a slow 60.
+    // The usual rate: 60 if the game reached it in the last 60 s, else 30. A steady 30 is
+    // taken as a scene meant to run at 30, not a slow 60. (With only 10 s of history a long
+    // slow cutscene at 43 fps was taken for a 30 fps scene and its sound sped back up.)
     if (pace_fps_count == pace_fps_history.size()) {
         std::move(pace_fps_history.begin() + 1, pace_fps_history.end(), pace_fps_history.begin());
         pace_fps_count--;
