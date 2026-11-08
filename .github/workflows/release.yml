@@ -51,16 +51,14 @@ jobs:
           name: eden-kledd ${{ github.ref_name }}
           files: release/*
           body: |
-            Metroid Prime 4: Beyond cutscene sync and texture upload fixes, on top of v0.4.2.
+            Metroid Prime 4: Beyond cutscene frame rate fix, on top of v0.5.
 
-            - Real-time cutscenes stay in sync. When the game runs below its usual frame rate, the sound now slows down with it instead of running ahead, so voices stay on the characters' lips (for example in the Nora Armstrong scene). The slowdown keeps the original pitch, and at full speed the sound is untouched.
-            - When the game falls behind for a moment, the sound is muted for those frames instead of pausing, so the sound keeps its place after a hitch.
-            - Camera cuts and scene changes stutter much less. GPU-decoded (ASTC) textures no longer make the emulator wait for the whole GPU to go idle after each one, which cost 30-360 ms per texture. In testing the worst camera-cut frame went from 843 ms to 486 ms.
-            - Texture pool updates are unswizzled on up to 8 threads, and pool uploads use a staging reserve that is set up at start, so a new area no longer waits on fresh memory. This uses about 500 MB more RAM.
-            - The long-frame log now also reports where the time went (new images, uploads, the slowest upload and its steps).
-            - Everything from v0.4.2: the texture pool fix, Discord Rich Presence and the new default settings. Everything from v0.4 and v0.3: the pool write watch, and the audio hang fix.
+            - Real-time cutscenes that dropped to 42-44 fps now run about 9-10 fps faster. Twice per frame the game asks the GPU to wait for a sync counter, and Eden answered by waiting for the graphics card to finish all queued work, about 7 ms each time. In testing the counter was always already reached, so Eden now skips the wait in that case and otherwise waits only for that counter.
+            - On CPUs with performance and efficiency cores (Intel 12th gen and later), the emulated CPU cores, the GPU thread and the other timing-critical threads are now kept on the performance cores on Windows. This used to work on Android only.
+            - The log now shows, every 2 seconds, how busy each emulation thread is and where the GPU thread waits. It costs a few percent of one CPU core.
+            - Everything from v0.5: cutscene audio that slows down with the game at the original pitch, faster camera cuts, and the parallel texture pool uploads.
 
-            Known: one cutscene still runs at about 42-44 fps. It is limited by the emulated CPU, not by the GPU or the resolution, and is being looked into.
+            Known: one cutscene still dips to about 50 fps. There the GPU thread itself has about twice its usual work, which is being looked into.
 
             If you see broken shadows at some camera angles, turn off the Level of Detail mod if you use it.
 
