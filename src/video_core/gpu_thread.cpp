@@ -13,6 +13,7 @@
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/core.h"
+#include "core/kledd_cpu_monitor.h"
 #include "core/frontend/graphics_context.h"
 #include "video_core/control/scheduler.h"
 #include "video_core/dma_pusher.h"
@@ -53,6 +54,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 break;
             }
             const auto started{std::chrono::steady_clock::now()};
+            Core::Kledd::SampleCoreThread(Core::Kledd::GpuThreadSlot);
             const char* kind{"other"};
             if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
                 kind = "submit";

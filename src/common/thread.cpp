@@ -9,6 +9,8 @@
 #include <limits>
 #include <string>
 #include <thread>
+#include <vector>
+#include <algorithm>
 
 #include "common/adpf.h"
 #include "common/error.h"
@@ -539,7 +541,59 @@ void SetCurrentThreadName(const char* name) {
 #endif
 }
 
+#ifdef _WIN32
+// eden-kledd: on hybrid CPUs (performance + efficiency cores), keep the threads that ask for it
+// on the performance cores. Windows otherwise moves them freely, including onto efficiency cores.
+static void KleddSetWindowsPerformanceCores() {
+    static const std::vector<ULONG> performance_sets = [] {
+        std::vector<ULONG> sets;
+        ULONG length = 0;
+        GetSystemCpuSetInformation(nullptr, 0, &length, GetCurrentProcess(), 0);
+        if (length == 0) {
+            return sets;
+        }
+        std::vector<unsigned char> buffer(length);
+        if (!GetSystemCpuSetInformation(reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buffer.data()),
+                                        length, &length, GetCurrentProcess(), 0)) {
+            return sets;
+        }
+        int min_class = 255;
+        int max_class = 0;
+        for (ULONG offset = 0; offset < length;) {
+            const auto* entry =
+                reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buffer.data() + offset);
+            if (entry->Type == CpuSetInformation) {
+                min_class = (std::min)(min_class, int{entry->CpuSet.EfficiencyClass});
+                max_class = (std::max)(max_class, int{entry->CpuSet.EfficiencyClass});
+            }
+            offset += entry->Size;
+        }
+        if (max_class > min_class) {
+            for (ULONG offset = 0; offset < length;) {
+                const auto* entry =
+                    reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buffer.data() + offset);
+                if (entry->Type == CpuSetInformation &&
+                    entry->CpuSet.EfficiencyClass == max_class) {
+                    sets.push_back(entry->CpuSet.Id);
+                }
+                offset += entry->Size;
+            }
+        }
+        LOG_INFO(Common, "[Kledd] {} performance cores for the emulation threads{}", sets.size(),
+                 sets.empty() ? " (not a hybrid CPU, threads are not restricted)" : "");
+        return sets;
+    }();
+    if (!performance_sets.empty()) {
+        SetThreadSelectedCpuSets(GetCurrentThread(), performance_sets.data(),
+                                 static_cast<ULONG>(performance_sets.size()));
+    }
+}
+#endif
+
 void SetCurrentThreadToPerformanceCores() {
+#ifdef _WIN32
+    KleddSetWindowsPerformanceCores();
+#endif
 #if defined(__ANDROID__)
     if (ADPF::AddCurrentThread(ADPF::Session::Render)) {
         SetCurrentThreadCoreGroup(CoreGroup::Unrestricted);

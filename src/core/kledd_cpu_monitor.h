@@ -14,7 +14,8 @@ void StartCpuMonitor();
 void StopCpuMonitor();
 
 /// Called on an emulated core's host thread from time to time (every interrupt): records the kind
-/// of host core it is on right now.
+/// of host core it is on right now. The GPU thread uses GpuThreadSlot.
 void SampleCoreThread(std::size_t core);
+inline constexpr std::size_t GpuThreadSlot = 4;
 
 } // namespace Core::Kledd

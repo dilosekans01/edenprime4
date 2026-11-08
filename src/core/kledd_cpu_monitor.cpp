@@ -15,6 +15,7 @@
 
 #include <windows.h>
 #include <tlhelp32.h>
+#include <intrin.h>
 
 #include "common/logging.h"
 #include "common/polyfill_thread.h"
@@ -24,7 +25,7 @@
 namespace Core::Kledd {
 namespace {
 
-constexpr std::size_t MaxCores = Core::Hardware::NUM_CPU_CORES;
+constexpr std::size_t MaxCores = Core::Hardware::NUM_CPU_CORES + 1; // + the GPU thread
 constexpr std::size_t MaxLogicalCpus = 256;
 
 struct CoreSamples {
@@ -101,8 +102,8 @@ struct ThreadUsage {
 void MonitorLoop(std::stop_token token) {
     Common::SetCurrentThreadName("KleddCpuMonitor");
     const DWORD pid = GetCurrentProcessId();
-    std::unordered_map<DWORD, unsigned long long> last_time; // 100 ns units, user + kernel
-    auto last_wall = std::chrono::steady_clock::now();
+    std::unordered_map<DWORD, unsigned long long> last_time; // reference cycles
+    unsigned long long last_tsc = __rdtsc();
     while (!token.stop_requested()) {
         for (int i = 0; i < 20 && !token.stop_requested(); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds{100});
@@ -110,10 +111,10 @@ void MonitorLoop(std::stop_token token) {
         if (token.stop_requested()) {
             break;
         }
-        const auto now = std::chrono::steady_clock::now();
-        const double wall_100ns =
-            std::chrono::duration<double, std::ratio<1, 10'000'000>>(now - last_wall).count();
-        last_wall = now;
+        // Thread cycle times count reference (TSC) cycles, so compare them with the TSC
+        const unsigned long long tsc = __rdtsc();
+        const double wall_cycles = static_cast<double>(tsc - last_tsc);
+        last_tsc = tsc;
 
         HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
         if (snapshot == INVALID_HANDLE_VALUE) {
@@ -133,21 +134,16 @@ void MonitorLoop(std::stop_token token) {
             if (!thread) {
                 continue;
             }
-            FILETIME created, exited, kernel_time, user_time;
-            if (GetThreadTimes(thread, &created, &exited, &kernel_time, &user_time)) {
-                const auto to_u64 = [](FILETIME t) {
-                    return (static_cast<unsigned long long>(t.dwHighDateTime) << 32) |
-                           t.dwLowDateTime;
-                };
-                const unsigned long long used = to_u64(kernel_time) + to_u64(user_time);
+            ULONG64 used = 0;
+            if (QueryThreadCycleTime(thread, &used)) {
                 current[entry.th32ThreadID] = used;
                 const auto it = last_time.find(entry.th32ThreadID);
-                if (it != last_time.end() && wall_100ns > 0.0) {
+                if (it != last_time.end() && wall_cycles > 0.0) {
                     const double percent =
-                        100.0 * static_cast<double>(used - it->second) / wall_100ns;
+                        100.0 * static_cast<double>(used - it->second) / wall_cycles;
                     total += percent;
                     std::string name = ThreadName(thread, entry.th32ThreadID);
-                    if (name.rfind("CPUCore_", 0) == 0 || name == "CPUThread") {
+                    if (name.rfind("CPUCore_", 0) == 0 || name == "CPUThread" || name == "GPU") {
                         cores.push_back({std::move(name), percent});
                     } else if (percent >= 3.0) {
                         others.push_back({std::move(name), percent});
@@ -161,8 +157,9 @@ void MonitorLoop(std::stop_token token) {
         if (cores.empty()) {
             continue;
         }
-        std::sort(cores.begin(), cores.end(),
-                  [](const auto& a, const auto& b) { return a.name < b.name; });
+        std::sort(cores.begin(), cores.end(), [](const auto& a, const auto& b) {
+            return (a.name == "GPU") != (b.name == "GPU") ? b.name == "GPU" : a.name < b.name;
+        });
         std::sort(others.begin(), others.end(),
                   [](const auto& a, const auto& b) { return a.percent > b.percent; });
         if (others.size() > 8) {
@@ -172,7 +169,9 @@ void MonitorLoop(std::stop_token token) {
         std::string core_text;
         for (const auto& c : cores) {
             const std::size_t index =
-                c.name == "CPUThread" ? 0 : static_cast<std::size_t>(c.name.back() - '0');
+                c.name == "GPU"         ? MaxCores - 1
+                : c.name == "CPUThread" ? 0
+                                        : static_cast<std::size_t>(c.name.back() - '0');
             std::string where;
             if (index < MaxCores) {
                 auto& s = core_samples[index];
