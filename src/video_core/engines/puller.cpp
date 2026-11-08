@@ -4,6 +4,9 @@
 // SPDX-FileCopyrightText: 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <chrono>
+#include <thread>
+
 #include "common/assert.h"
 #include "common/logging.h"
 #include "common/settings.h"
@@ -18,6 +21,8 @@
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/engines/puller.h"
 #include "video_core/gpu.h"
+#include "video_core/host1x/host1x.h"
+#include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
 
@@ -76,11 +81,45 @@ void KleddReleaseFences(VideoCore::RasterizerInterface& rasterizer,
 
 void Puller::ProcessFenceActionMethod(DmaPusher& dma_pusher) {
     switch (regs.fence_action.op) {
-    case Puller::FenceOperation::Acquire:
-        // UNIMPLEMENTED_MSG("Channel Scheduling pending.");
-        // WaitFence(regs.fence_action.syncpoint_id, regs.fence_value);
-        KleddReleaseFences(*dma_pusher.rasterizer);
+    case Puller::FenceOperation::Acquire: {
+        // eden-kledd: wait for the syncpoint the channel asked for, not for all GPU work. Eden used
+        // to wait for every pending fence here (a whole GPU round trip, twice per frame in some
+        // Metroid Prime 4 cutscenes). The syncpoint's host value is raised by the fence release
+        // thread after the work before it is done and flushed, so it is as safe as the old wait.
+        const u32 syncpoint_id = regs.fence_action.syncpoint_id;
+        const u32 value = regs.fence_value;
+        auto& syncpoints = dma_pusher.system.Host1x().GetSyncpointManager();
+        auto& stats = VideoCommon::Kledd::WaitStats::Get();
+        if (syncpoint_id >= Host1x::SyncpointManager::MaxSyncpoints()) {
+            KleddReleaseFences(*dma_pusher.rasterizer);
+            break;
+        }
+        if (syncpoints.IsReadyHost(syncpoint_id, value)) {
+            stats.Count("fence acquire already reached");
+            break;
+        }
+        if (!syncpoints.IsReadyGuest(syncpoint_id, value)) {
+            // Nothing queued will reach it: keep the old behaviour
+            KleddReleaseFences(*dma_pusher.rasterizer);
+            break;
+        }
+        const auto start = VideoCommon::Kledd::WaitStats::Clock::now();
+        dma_pusher.rasterizer->FlushCommands();
+        bool reached = true;
+        while (!syncpoints.IsReadyHost(syncpoint_id, value)) {
+            if (VideoCommon::Kledd::WaitStats::Clock::now() - start > std::chrono::milliseconds{200}) {
+                reached = false;
+                break;
+            }
+            std::this_thread::yield();
+        }
+        stats.Add("fence acquire: waited for its syncpoint", std::source_location::current(), start);
+        if (!reached) {
+            stats.Count("fence acquire timed out, fell back to the full wait");
+            KleddReleaseFences(*dma_pusher.rasterizer);
+        }
         break;
+    }
     case Puller::FenceOperation::Increment:
         dma_pusher.rasterizer->SignalSyncPoint(regs.fence_action.syncpoint_id);
         break;

@@ -62,6 +62,10 @@ public:
         return syncpoints_guest[syncpoint_id].load(std::memory_order_acquire) >= expected_value;
     }
 
+    static constexpr size_t MaxSyncpoints() {
+        return NUM_MAX_SYNCPOINTS;
+    }
+
     bool IsReadyHost(u32 syncpoint_id, u32 expected_value) const {
         return syncpoints_host[syncpoint_id].load(std::memory_order_acquire) >= expected_value;
     }

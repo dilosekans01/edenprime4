@@ -50,6 +50,12 @@ public:
         }
     }
 
+    /// Counts an event that has no wait time of its own
+    void Count(const char* what) {
+        std::scoped_lock lock{mutex};
+        entries[what].count++;
+    }
+
     /// Returns the total waited on the GPU thread and the top callers, and resets
     std::string TakeSummary(uint64_t& gpu_thread_wait_ms) {
         std::vector<std::pair<std::string, Entry>> list;
@@ -63,7 +69,7 @@ public:
         std::sort(list.begin(), list.end(),
                   [](const auto& a, const auto& b) { return a.second.us > b.second.us; });
         std::string text;
-        for (std::size_t i = 0; i < list.size() && i < 6; ++i) {
+        for (std::size_t i = 0; i < list.size() && i < 8; ++i) {
             text += fmt::format("{}{} ms in {} waits: {}", text.empty() ? "" : "; ",
                                 list[i].second.us / 1000, list[i].second.count, list[i].first);
         }
