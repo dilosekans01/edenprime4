@@ -16,6 +16,7 @@
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/physical_core.h"
+#include "core/kledd_cpu_monitor.h"
 #include "video_core/gpu.h"
 
 namespace Core {
@@ -30,9 +31,11 @@ void CpuManager::Initialize() {
         core_data[core].host_thread = std::jthread([this, core](std::stop_token token) {
             RunThread(token, core);
         });
+    Kledd::StartCpuMonitor();
 }
 
 void CpuManager::Shutdown() {
+    Kledd::StopCpuMonitor();
     for (std::size_t core = 0; core < num_cores; core++) {
         if (core_data[core].host_thread.joinable()) {
             core_data[core].host_thread.request_stop();
@@ -63,6 +66,7 @@ void CpuManager::ShutdownThreadFunction(Kernel::KernelCore& kernel) {
 
 void CpuManager::HandleInterrupt(Kernel::KernelCore& kernel) {
     auto core_index = kernel.CurrentPhysicalCoreIndex();
+    Kledd::SampleCoreThread(is_multicore ? core_index : 0);
     Kernel::KInterruptManager::HandleInterrupt(kernel, s32(core_index));
 }
 

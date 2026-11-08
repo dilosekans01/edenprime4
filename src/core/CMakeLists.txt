@@ -23,6 +23,8 @@ add_library(core STATIC
     core_timing.h
     cpu_manager.cpp
     cpu_manager.h
+    kledd_cpu_monitor.cpp
+    kledd_cpu_monitor.h
     launch_params.cpp
     launch_params.h
     crypto/aes_util.cpp
