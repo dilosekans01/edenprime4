@@ -19,6 +19,7 @@
 #include "video_core/gpu.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/host1x/host1x.h"
+#include "video_core/kledd_wait_stats.h"
 #include "video_core/renderer_base.h"
 
 namespace VideoCommon::GPUThread {
@@ -36,6 +37,10 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
         Common::SetCurrentThreadToPerformanceCores();
         system.RegisterHostThread();
+        VideoCommon::Kledd::WaitStats::MarkGpuThread();
+        auto kledd_window_start = std::chrono::steady_clock::now();
+        u64 kledd_busy_us = 0;
+        u64 kledd_submit_us = 0;
 
         auto current_context = context.Acquire();
         CommandDataContainer next;
@@ -72,6 +77,25 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 const auto took_ms{static_cast<u32>(
                     std::chrono::duration_cast<std::chrono::milliseconds>(finished - started)
                         .count())};
+                const auto took_us{static_cast<u64>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(finished - started)
+                        .count())};
+                kledd_busy_us += took_us;
+                if (kind[0] == 's') {
+                    kledd_submit_us += took_us;
+                }
+                if (finished - kledd_window_start >= std::chrono::seconds{2}) {
+                    u64 waited_ms{};
+                    const std::string waits =
+                        VideoCommon::Kledd::WaitStats::Get().TakeSummary(waited_ms);
+                    LOG_INFO(HW_GPU,
+                             "[Kledd] GPU thread in the last 2 s: busy {} ms (submits {} ms), of "
+                             "that blocked {} ms | waits: {}",
+                             kledd_busy_us / 1000, kledd_submit_us / 1000, waited_ms, waits);
+                    kledd_busy_us = 0;
+                    kledd_submit_us = 0;
+                    kledd_window_start = finished;
+                }
                 u32 n{};
                 u32 worst{};
                 if (took_ms >= 20 && slow_commands.Note(took_ms, n, worst)) {

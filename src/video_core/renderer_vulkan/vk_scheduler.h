@@ -13,11 +13,14 @@
 #include <thread>
 #include <utility>
 #include <queue>
+#include <source_location>
 
 #include "common/alignment.h"
 #include "common/common_types.h"
+#include "common/scope_exit.h"
 #include "common/polyfill_thread.h"
 #include "common/settings.h"
+#include "video_core/kledd_wait_stats.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -47,11 +50,12 @@ public:
     u64 Flush(VkSemaphore signal_semaphore = {}, VkSemaphore wait_semaphore = {});
 
     /// Sends the current execution context to the GPU and waits for it to complete.
-    void Finish(VkSemaphore signal_semaphore = {}, VkSemaphore wait_semaphore = {});
+    void Finish(VkSemaphore signal_semaphore = {}, VkSemaphore wait_semaphore = {},
+                std::source_location loc = std::source_location::current());
 
     /// Waits for the worker thread to finish executing everything. After this function returns it's
     /// safe to touch worker resources.
-    void WaitWorker();
+    void WaitWorker(std::source_location loc = std::source_location::current());
 
     /// Sends currently recorded work to the worker thread.
     void DispatchWork();
@@ -130,12 +134,17 @@ public:
     }
 
     /// Waits for the given GPU tick, optionally pacing frames.
-    void Wait(u64 tick, double target_fps = 0.0) {
+    void Wait(u64 tick, double target_fps = 0.0,
+              std::source_location loc = std::source_location::current()) {
         if (tick > 0) {
             if (tick >= master_semaphore->CurrentTick()) {
                 Flush();
             }
-            master_semaphore->Wait(tick);
+            if (!master_semaphore->IsFree(tick)) {
+                const auto wait_start = VideoCommon::Kledd::WaitStats::Clock::now();
+                master_semaphore->Wait(tick);
+                VideoCommon::Kledd::WaitStats::Get().Add("host GPU", loc, wait_start);
+            }
         }
         if (Settings::values.use_speed_limit.GetValue() && target_fps > 0.0) {
             auto now = std::chrono::steady_clock::now();
@@ -149,6 +158,10 @@ public:
             frame_counter++;
             auto target_time = start_time + frame_interval * frame_counter;
             if (target_time >= now) {
+                const auto pace_start = VideoCommon::Kledd::WaitStats::Clock::now();
+                SCOPE_EXIT {
+                    VideoCommon::Kledd::WaitStats::Get().Add("frame pacing", loc, pace_start);
+                };
                 constexpr auto spin_tail = std::chrono::milliseconds(1);
                 auto sleep_time = target_time - now;
                 if (sleep_time > spin_tail * 2) {

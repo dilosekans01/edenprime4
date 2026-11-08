@@ -61,16 +61,21 @@ u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
     return signal_value;
 }
 
-void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
+void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
+                       std::source_location loc) {
     // When finishing, we need to wait for the submission to have executed on the device.
     const u64 presubmit_tick = CurrentTick();
     SubmitExecution(signal_semaphore, wait_semaphore);
-    Wait(presubmit_tick);
+    Wait(presubmit_tick, 0.0, loc);
     AllocateNewContext();
 }
 
-void Scheduler::WaitWorker() {
+void Scheduler::WaitWorker(std::source_location loc) {
     DispatchWork();
+    const auto wait_start = VideoCommon::Kledd::WaitStats::Clock::now();
+    SCOPE_EXIT {
+        VideoCommon::Kledd::WaitStats::Get().Add("Vulkan worker", loc, wait_start);
+    };
 
     // Ensure the queue is drained.
     {
