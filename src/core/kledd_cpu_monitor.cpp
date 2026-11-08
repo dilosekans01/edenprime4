@@ -97,6 +97,7 @@ std::string ThreadName(HANDLE handle, DWORD tid) {
 struct ThreadUsage {
     std::string name;
     double percent;
+    unsigned long cpu_sets; ///< CPU sets the thread is restricted to, 0 = not restricted
 };
 
 void MonitorLoop(std::stop_token token) {
@@ -135,6 +136,8 @@ void MonitorLoop(std::stop_token token) {
                 continue;
             }
             ULONG64 used = 0;
+            ULONG selected_sets = 0;
+            GetThreadSelectedCpuSets(thread, nullptr, 0, &selected_sets);
             if (QueryThreadCycleTime(thread, &used)) {
                 current[entry.th32ThreadID] = used;
                 const auto it = last_time.find(entry.th32ThreadID);
@@ -144,9 +147,9 @@ void MonitorLoop(std::stop_token token) {
                     total += percent;
                     std::string name = ThreadName(thread, entry.th32ThreadID);
                     if (name.rfind("CPUCore_", 0) == 0 || name == "CPUThread" || name == "GPU") {
-                        cores.push_back({std::move(name), percent});
+                        cores.push_back({std::move(name), percent, selected_sets});
                     } else if (percent >= 3.0) {
-                        others.push_back({std::move(name), percent});
+                        others.push_back({std::move(name), percent, selected_sets});
                     }
                 }
             }
@@ -184,13 +187,17 @@ void MonitorLoop(std::stop_token token) {
                     where = fmt::format(", {} moves", moves);
                 }
             }
-            core_text += fmt::format("{}{} {:.0f}%{}", core_text.empty() ? "" : "; ", c.name,
-                                     c.percent, where);
+            core_text += fmt::format("{}{} {:.0f}%{}{}", core_text.empty() ? "" : "; ", c.name,
+                                     c.percent, where,
+                                     c.cpu_sets ? fmt::format(", pinned to {}", c.cpu_sets)
+                                                : std::string{});
         }
         std::string other_text;
         for (const auto& o : others) {
-            other_text += fmt::format("{}{} {:.0f}%", other_text.empty() ? "" : ", ", o.name,
-                                      o.percent);
+            other_text += fmt::format("{}{} {:.0f}%{}", other_text.empty() ? "" : ", ", o.name,
+                                      o.percent,
+                                      o.cpu_sets ? fmt::format(" (pinned to {})", o.cpu_sets)
+                                                 : std::string{});
         }
         LOG_INFO(Core,
                  "[Kledd] CPU use in the last 2 s (100% = one host core): {} | others: {} | "

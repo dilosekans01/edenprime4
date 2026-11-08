@@ -579,14 +579,18 @@ static void KleddSetWindowsPerformanceCores() {
                 offset += entry->Size;
             }
         }
-        LOG_INFO(Common, "[Kledd] {} performance cores for the emulation threads{}", sets.size(),
-                 sets.empty() ? " (not a hybrid CPU, threads are not restricted)" : "");
         return sets;
     }();
+    BOOL ok = TRUE;
     if (!performance_sets.empty()) {
-        SetThreadSelectedCpuSets(GetCurrentThread(), performance_sets.data(),
-                                 static_cast<ULONG>(performance_sets.size()));
+        ok = SetThreadSelectedCpuSets(GetCurrentThread(), performance_sets.data(),
+                                      static_cast<ULONG>(performance_sets.size()));
     }
+    LOG_INFO(Common, "[Kledd] thread {} restricted to {} performance cores{}",
+             GetCurrentThreadId(), performance_sets.size(),
+             performance_sets.empty() ? " (not a hybrid CPU, not restricted)"
+             : ok                     ? ""
+                                      : " FAILED");
 }
 #endif
 
