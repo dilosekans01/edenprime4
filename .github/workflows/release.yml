@@ -51,15 +51,16 @@ jobs:
           name: eden-kledd ${{ github.ref_name }}
           files: release/*
           body: |
-            Metroid Prime 4: Beyond texture pool fix, Discord Rich Presence and new default settings, on top of the v0.4 stutter fix, the v0.3 audio hang fix and the v0.2 scan fix.
+            Metroid Prime 4: Beyond cutscene sync and texture upload fixes, on top of v0.4.2.
 
-            - A texture pool is no longer uploaded in full twice when the game creates it. The write watch used to attach only after the first full upload and then force a second one; it now attaches at the first upload.
-            - Entering a new area costs far less. Only the parts of a pool the game has mapped are read, the rest is filled with zeros on the GPU, and the remaining tiles arrive as the game streams them. No first upload of a pool took more than 43 ms in testing at 2X, down from up to 2.7 s for a full set on slower machines.
-            - The texture cache garbage collector gives a pool that a menu hides for a moment about 10 seconds to be drawn again, as long as texture memory is below the critical budget. Above it, old pools make room right away.
-            - Discord Rich Presence is built in and on by default: it shows the game's title and play time, with the official icon for Metroid Prime 4. Turn it off under Configure > Web if you don't want your game shown on your profile.
-            - New default settings: 2X resolution, ScaleForce, SMAA, Mailbox vsync, Aggressive VRAM usage, GPU video decoding, asynchronous shaders, buffer history on, reactive flushing off, and the long-frame log on. Settings you changed yourself are kept. 2X is demanding: on a slower GPU, lower it under Graphics.
-            - Everything from v0.4: the pools stay write-protected in 16-slice groups and only the groups the game touched are uploaded, which fixed the one-second freezes every few seconds and the 6 fps spot in Volt Forge.
-            - Everything from v0.3: audio no longer buzzes when the game stalls while loading, the sound output never replays stale buffer memory, the sleep on every file read while a video decoder is open is gone, and the upstream async shader revert (PR 4512) and composer buffer release (PR 4548) are carried over.
+            - Real-time cutscenes stay in sync. When the game runs below its usual frame rate, the sound now slows down with it instead of running ahead, so voices stay on the characters' lips (for example in the Nora Armstrong scene). The slowdown keeps the original pitch, and at full speed the sound is untouched.
+            - When the game falls behind for a moment, the sound is muted for those frames instead of pausing, so the sound keeps its place after a hitch.
+            - Camera cuts and scene changes stutter much less. GPU-decoded (ASTC) textures no longer make the emulator wait for the whole GPU to go idle after each one, which cost 30-360 ms per texture. In testing the worst camera-cut frame went from 843 ms to 486 ms.
+            - Texture pool updates are unswizzled on up to 8 threads, and pool uploads use a staging reserve that is set up at start, so a new area no longer waits on fresh memory. This uses about 500 MB more RAM.
+            - The long-frame log now also reports where the time went (new images, uploads, the slowest upload and its steps).
+            - Everything from v0.4.2: the texture pool fix, Discord Rich Presence and the new default settings. Everything from v0.4 and v0.3: the pool write watch, and the audio hang fix.
+
+            Known: one cutscene still runs at about 42-44 fps. It is limited by the emulated CPU, not by the GPU or the resolution, and is being looked into.
 
             If you see broken shadows at some camera angles, turn off the Level of Detail mod if you use it.
 
