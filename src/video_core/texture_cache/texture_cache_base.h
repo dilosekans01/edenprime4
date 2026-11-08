@@ -350,6 +350,10 @@ private:
         u64 guest_bytes = 0;
     };
     KleddSlowUpload kledd_slow_upload{};
+    u64 kledd_accel_count = 0;
+    u64 kledd_accel_bytes = 0;
+    u64 kledd_accel_us = 0;
+    std::chrono::steady_clock::time_point kledd_accel_log{};
     /// Step times of the UploadImageContents call in progress
     u64 kledd_step_read_us = 0;
     u64 kledd_step_unswizzle_us = 0;

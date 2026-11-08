@@ -1973,10 +1973,29 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
     const GPUVAddr gpu_addr = image.gpu_addr;
 
     if (True(image.flags & ImageFlagBits::AcceleratedUpload)) {
+        const auto accel_start = std::chrono::steady_clock::now();
         gpu_memory->ReadBlock(gpu_addr, mapped_span.data(), mapped_span.size_bytes(),
                               VideoCommon::CacheType::NoTextureCache);
         const auto uploads = FullUploadSwizzles(image.info);
         runtime.AccelerateImageUpload(image, staging, uploads, 0, 0);
+        // eden-kledd diagnostic: GPU-decoded (ASTC) uploads, summarised every 2 seconds
+        const auto now = std::chrono::steady_clock::now();
+        kledd_accel_count++;
+        kledd_accel_bytes += image.guest_size_bytes;
+        kledd_accel_us += static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::microseconds>(now - accel_start).count());
+        if (kledd_accel_log.time_since_epoch().count() == 0) {
+            kledd_accel_log = now;
+        } else if (now - kledd_accel_log >= std::chrono::seconds{2}) {
+            LOG_INFO(HW_GPU,
+                     "[Kledd] GPU-decoded texture uploads in the last 2 s: {} ({} MiB), {} ms on "
+                     "the GPU thread",
+                     kledd_accel_count, kledd_accel_bytes >> 20, kledd_accel_us / 1000);
+            kledd_accel_count = 0;
+            kledd_accel_bytes = 0;
+            kledd_accel_us = 0;
+            kledd_accel_log = now;
+        }
         return;
     }
 

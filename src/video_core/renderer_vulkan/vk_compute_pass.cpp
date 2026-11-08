@@ -613,7 +613,10 @@ void ASTCDecoderPass::Assemble(Image& image, const StagingBufferRef& map,
         cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                        vk::PIPELINE_STAGE_GRAPHICS_COMPUTE, 0, image_barrier);
     });
-    scheduler.Finish();
+    // eden-kledd: no scheduler.Finish() here. It made the GPU thread wait for the whole GPU to
+    // go idle after every ASTC texture, 30-360 ms each in Metroid Prime 4 cutscenes. The decode
+    // is ordered before later use by the barrier above, and the staging buffer, the descriptor
+    // payload and the descriptor set are all released by GPU tick like every other pass.
 }
 
 constexpr u32 BL3D_BINDING_INPUT_BUFFER  = 0;
