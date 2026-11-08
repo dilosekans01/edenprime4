@@ -27,6 +27,7 @@
 #include "video_core/query_cache/query_cache_base.h"
 #include "video_core/query_cache/query_stream.h"
 #include "video_core/query_cache/types.h"
+#include "video_core/kledd_wait_stats.h"
 
 namespace VideoCommon {
 
@@ -581,7 +582,10 @@ bool QueryCacheBase<Traits>::SemiFlushQueryDirty(QueryCacheBase<Traits>::QueryLo
 
 template <typename Traits>
 void QueryCacheBase<Traits>::RequestGuestHostSync() {
+    const auto start = Kledd::WaitStats::Clock::now();
     impl->rasterizer.ReleaseFences();
+    Kledd::WaitStats::Get().Add("fence round trip (query sync)", std::source_location::current(),
+                                start);
 }
 
 } // namespace VideoCommon

@@ -14,6 +14,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/kepler_memory.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/kledd_wait_stats.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/engines/puller.h"
 #include "video_core/gpu.h"
@@ -63,12 +64,22 @@ void Puller::ProcessBindMethod(DmaPusher& dma_pusher, const MethodCall& method_c
     }
 }
 
+namespace {
+// eden-kledd diagnostic: ReleaseFences waits until the host GPU has run everything so far
+void KleddReleaseFences(VideoCore::RasterizerInterface& rasterizer,
+                        std::source_location loc = std::source_location::current()) {
+    const auto start = VideoCommon::Kledd::WaitStats::Clock::now();
+    rasterizer.ReleaseFences();
+    VideoCommon::Kledd::WaitStats::Get().Add("fence round trip", loc, start);
+}
+} // namespace
+
 void Puller::ProcessFenceActionMethod(DmaPusher& dma_pusher) {
     switch (regs.fence_action.op) {
     case Puller::FenceOperation::Acquire:
         // UNIMPLEMENTED_MSG("Channel Scheduling pending.");
         // WaitFence(regs.fence_action.syncpoint_id, regs.fence_value);
-        dma_pusher.rasterizer->ReleaseFences();
+        KleddReleaseFences(*dma_pusher.rasterizer);
         break;
     case Puller::FenceOperation::Increment:
         dma_pusher.rasterizer->SignalSyncPoint(regs.fence_action.syncpoint_id);
@@ -95,19 +106,19 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
                 regs.acquire_active = true;
                 regs.acquire_mode = false;
                 if (word != regs.acquire_value) {
-                    dma_pusher.rasterizer->ReleaseFences();
+                    KleddReleaseFences(*dma_pusher.rasterizer);
                     continue;
                 }
             } else if (op == GpuSemaphoreOperation::AcquireGequal) {
                 regs.acquire_active = true;
                 regs.acquire_mode = true;
                 if (word < regs.acquire_value) {
-                    dma_pusher.rasterizer->ReleaseFences();
+                    KleddReleaseFences(*dma_pusher.rasterizer);
                     continue;
                 }
             } else if (op == GpuSemaphoreOperation::AcquireMask) {
                 if (word && regs.semaphore_sequence == 0) {
-                    dma_pusher.rasterizer->ReleaseFences();
+                    KleddReleaseFences(*dma_pusher.rasterizer);
                     continue;
                 }
             } else {
@@ -129,7 +140,7 @@ void Puller::ProcessSemaphoreAcquire(DmaPusher& dma_pusher) {
     while (word != value) {
         regs.acquire_active = true;
         regs.acquire_value = value;
-        dma_pusher.rasterizer->ReleaseFences();
+        KleddReleaseFences(*dma_pusher.rasterizer);
         word = dma_pusher.memory_manager.Read<u32>(regs.semaphore_address.SemaphoreAddress());
         // TODO(kemathe73) figure out how to do the acquire_timeout
         regs.acquire_mode = false;
